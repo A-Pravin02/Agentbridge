@@ -6,11 +6,23 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "db:migrate": "prisma migrate dev --schema=prisma/schema.prisma",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:reset": "prisma migrate reset --schema=prisma/schema.prisma --force"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
-    "@agentbridge/shared-types": "*",
+    "@agentbridge/audit": "*",
     "@agentbridge/policy-engine": "*",
-    "@agentbridge/audit": "*"
+    "@agentbridge/shared-types": "*",
+    "@fastify/cors": "^11.3.0",
+    "@prisma/client": "^6.10.1",
+    "fastify": "^5.12.1"
+  },
+  "devDependencies": {
+    "prisma": "^6.10.1"
   }
 }

@@ -1,0 +1,173 @@
+// This is your Prisma schema file.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// ============================================
+// AgentBridge Database Schema
+// ============================================
+
+model Merchant {
+  id        String   @id @default(cuid())
+  name      String
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  products        Product[]
+  agents          Agent[]
+  policies        Policy[]
+  purchaseIntents PurchaseIntent[]
+
+  @@map("merchants")
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  name        String
+  description String   @default("")
+  price       Float
+  currency    String   @default("INR")
+  category    String
+  stock       Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  merchant        Merchant         @relation(fields: [merchantId], references: [id])
+  purchaseIntents PurchaseIntent[]
+
+  @@map("products")
+}
+
+model Agent {
+  id         String   @id @default(cuid())
+  merchantId String   @map("merchant_id")
+  name       String
+  status     String   @default("ACTIVE")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  merchant        Merchant          @relation(fields: [merchantId], references: [id])
+  permissions     AgentPermission[]
+  purchaseIntents PurchaseIntent[]
+
+  @@map("agents")
+}
+
+model AgentPermission {
+  id                      String    @id @default(cuid())
+  agentId                 String    @map("agent_id")
+  canSearch               Boolean   @default(true) @map("can_search")
+  canCreatePurchaseIntent Boolean   @default(true) @map("can_create_purchase_intent")
+  canExecutePurchase      Boolean   @default(true) @map("can_execute_purchase")
+  allowedCategories       String    @default("[]") @map("allowed_categories")
+  maxTransactionAmount    Float     @map("max_transaction_amount")
+  maxDailyAmount          Float     @map("max_daily_amount")
+  expiresAt               DateTime? @map("expires_at")
+
+  agent Agent @relation(fields: [agentId], references: [id])
+
+  @@map("agent_permissions")
+}
+
+model Policy {
+  id                    String   @id @default(cuid())
+  merchantId            String   @map("merchant_id")
+  maxTransactionAmount  Float    @map("max_transaction_amount")
+  maxDailyAmount        Float    @map("max_daily_amount")
+  maxTransactionsPerDay Int      @map("max_transactions_per_day")
+  allowedCategories     String   @default("[]") @map("allowed_categories")
+  approvalThreshold     Float    @map("approval_threshold")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  merchant Merchant @relation(fields: [merchantId], references: [id])
+
+  @@map("policies")
+}
+
+model PurchaseIntent {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  agentId     String   @map("agent_id")
+  productId   String   @map("product_id")
+  quantity    Int      @default(1)
+  amount      Float
+  status      String   @default("CREATED")
+  agentReason String   @default("") @map("agent_reason")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  merchant       Merchant        @relation(fields: [merchantId], references: [id])
+  agent          Agent           @relation(fields: [agentId], references: [id])
+  product        Product         @relation(fields: [productId], references: [id])
+  authorizations Authorization[]
+  approvals      Approval[]
+  transactions   Transaction[]
+
+  @@map("purchase_intents")
+}
+
+model Authorization {
+  id               String   @id @default(cuid())
+  purchaseIntentId String   @map("purchase_intent_id")
+  decision         String
+  reasons          String   @default("[]")
+  policySnapshot   String   @default("{}") @map("policy_snapshot")
+  expiresAt        DateTime @map("expires_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+
+  @@map("authorizations")
+}
+
+model Approval {
+  id               String    @id @default(cuid())
+  purchaseIntentId String    @map("purchase_intent_id")
+  status           String    @default("PENDING")
+  approvedBy       String?   @map("approved_by")
+  approvedAt       DateTime? @map("approved_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+
+  @@map("approvals")
+}
+
+model Transaction {
+  id                String   @id @default(cuid())
+  purchaseIntentId  String   @map("purchase_intent_id")
+  amount            Float
+  currency          String   @default("INR")
+  paymentProvider   String   @default("razorpay") @map("payment_provider")
+  providerOrderId   String?  @map("provider_order_id")
+  providerPaymentId String?  @map("provider_payment_id")
+  status            String   @default("PENDING")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+
+  @@map("transactions")
+}
+
+model AuditEvent {
+  id           String   @id @default(cuid())
+  action       String
+  actorType    String   @map("actor_type")
+  actorId      String   @map("actor_id")
+  entityId     String   @map("entity_id")
+  metadata     String   @default("{}") 
+  previousHash String   @default("") @map("previous_hash")
+  hash         String   @default("")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("audit_events")
+}
