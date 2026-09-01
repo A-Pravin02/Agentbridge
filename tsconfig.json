@@ -17,5 +17,5 @@
     "sourceMap": true,
     "composite": true
   },
-  "exclude": ["node_modules", "dist", "apps/web"]
+  "exclude": ["node_modules", "dist", "apps/web", "vitest.config.ts"]
 }

@@ -1,0 +1,13 @@
+{
+  "name": "@agentbridge/threat-analyzer",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@agentbridge/shared-types": "*"
+  }
+}

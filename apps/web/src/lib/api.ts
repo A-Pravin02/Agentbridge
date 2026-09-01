@@ -1,5 +1,9 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
+// Admin API key — matches ADMIN_API_KEY env var on server
+// In a real deployment this would come from a secure session/token
+const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_KEY || 'dev-admin-key-change-in-production';
+
 export async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -15,6 +19,17 @@ export async function fetchAPI<T>(path: string, options?: RequestInit): Promise<
   }
   
   return res.json();
+}
+
+// Admin fetch — includes X-Admin-Key header for protected endpoints
+export async function fetchAdminAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  return fetchAPI<T>(path, {
+    ...options,
+    headers: {
+      'x-admin-key': ADMIN_KEY,
+      ...options?.headers,
+    },
+  });
 }
 
 export const api = {
@@ -36,9 +51,9 @@ export const api = {
   completePurchase: (id: string) =>
     fetchAPI<any>(`/api/purchase-intents/${id}/complete`, { method: 'POST', body: '{}' }),
   approvePurchase: (id: string) =>
-    fetchAPI<any>(`/api/purchase-intents/${id}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy: 'merchant_admin' }) }),
+    fetchAdminAPI<any>(`/api/purchase-intents/${id}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy: 'merchant_admin' }) }),
   denyPurchase: (id: string) =>
-    fetchAPI<any>(`/api/purchase-intents/${id}/deny`, { method: 'POST', body: JSON.stringify({ deniedBy: 'merchant_admin' }) }),
+    fetchAdminAPI<any>(`/api/purchase-intents/${id}/deny`, { method: 'POST', body: JSON.stringify({ deniedBy: 'merchant_admin' }) }),
   
   // Transactions
   getTransactions: () => fetchAPI<any>('/api/transactions'),
@@ -48,14 +63,29 @@ export const api = {
   getAuditEvents: () => fetchAPI<any>('/api/audit-events'),
   verifyAuditChain: () => fetchAPI<any>('/api/audit/verify'),
   
-  // Policies
+  // Policies (admin)
   getPolicies: () => fetchAPI<any>('/api/policies'),
   updatePolicy: (id: string, data: any) =>
-    fetchAPI<any>(`/api/policies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    fetchAdminAPI<any>(`/api/policies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   
   // Approvals
   getPendingApprovals: () => fetchAPI<any>('/api/approvals/pending'),
   
   // Agents
   getAgents: () => fetchAPI<any>('/api/agents'),
+
+  // Security & Zero-Trust
+  getSecurityOverview: () => fetchAPI<any>('/api/security/overview'),
+  getSecurityAgents: () => fetchAPI<any>('/api/security/agents'),
+  getSecurityIncidents: () => fetchAPI<any>('/api/security/incidents'),
+  unquarantineAgent: (id: string) => 
+    fetchAdminAPI<any>(`/api/security/agents/${id}/unquarantine`, { method: 'POST', body: '{}' }),
+  blockAgentPermanent: (id: string, reason?: string) => 
+    fetchAdminAPI<any>(`/api/security/agents/${id}/block-permanent`, { method: 'POST', body: JSON.stringify({ reason }) }),
+
+  // Demo — Hackathon live demonstration endpoints
+  simulateAttack: (agentId?: string) =>
+    fetchAPI<any>('/api/demo/simulate-attack', { method: 'POST', body: JSON.stringify({ agentId: agentId || 'agent_shopping_01' }) }),
+  resetDemo: (agentId?: string) =>
+    fetchAPI<any>('/api/demo/reset', { method: 'POST', body: JSON.stringify({ agentId: agentId || 'agent_shopping_01' }) }),
 };

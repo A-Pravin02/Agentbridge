@@ -50,15 +50,30 @@ model Agent {
   id         String   @id @default(cuid())
   merchantId String   @map("merchant_id")
   name       String
+  // Single authoritative status: ACTIVE | SUSPENDED | QUARANTINED | BLOCKED
   status     String   @default("ACTIVE")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  merchant        Merchant          @relation(fields: [merchantId], references: [id])
-  permissions     AgentPermission[]
-  purchaseIntents PurchaseIntent[]
+  // ---- Security Fields ----
+  quarantinedAt          DateTime? @map("quarantined_at")
+  quarantineReason       String?   @map("quarantine_reason")
+  quarantineTriggeredBy  String?   @map("quarantine_triggered_by")
+  securityViolationCount Int       @default(0) @map("security_violation_count")
+  severeThreatCount      Int       @default(0) @map("severe_threat_count")
+  lastSecurityIncidentAt DateTime? @map("last_security_incident_at")
+  // Agent-specific HMAC signing secret (never returned in API responses)
+  signingSecret          String?   @map("signing_secret")
 
+  merchant          Merchant           @relation(fields: [merchantId], references: [id])
+  permissions       AgentPermission[]
+  purchaseIntents   PurchaseIntent[]
+  securityIncidents SecurityIncident[]
+  threatAssessments ThreatAssessmentRecord[]
+
+  @@index([merchantId, status])
   @@map("agents")
 }
+
 
 model AgentPermission {
   id                      String    @id @default(cuid())
@@ -104,13 +119,15 @@ model PurchaseIntent {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  merchant       Merchant        @relation(fields: [merchantId], references: [id])
-  agent          Agent           @relation(fields: [agentId], references: [id])
-  product        Product         @relation(fields: [productId], references: [id])
-  authorizations Authorization[]
-  approvals      Approval[]
-  transactions   Transaction[]
+  merchant          Merchant               @relation(fields: [merchantId], references: [id])
+  agent             Agent                  @relation(fields: [agentId], references: [id])
+  product           Product                @relation(fields: [productId], references: [id])
+  authorizations    Authorization[]
+  approvals         Approval[]
+  transactions      Transaction[]
+  threatAssessments ThreatAssessmentRecord[]
 
+  @@index([agentId, status, createdAt])
   @@map("purchase_intents")
 }
 
@@ -164,10 +181,77 @@ model AuditEvent {
   actorType    String   @map("actor_type")
   actorId      String   @map("actor_id")
   entityId     String   @map("entity_id")
-  metadata     String   @default("{}") 
+  metadata     String   @default("{}")
   previousHash String   @default("") @map("previous_hash")
   hash         String   @default("")
   createdAt    DateTime @default(now()) @map("created_at")
 
+  @@index([entityId, createdAt])
   @@map("audit_events")
+}
+
+// ============================================
+// Security Defense Models
+// ============================================
+
+model SecurityIncident {
+  id          String    @id @default(cuid())
+  agentId     String    @map("agent_id")
+  type        String    // SecurityViolation or ThreatRule value
+  severity    String    @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
+  description String
+  metadata    String    @default("{}")
+  detectedAt  DateTime  @default(now()) @map("detected_at")
+  resolvedAt  DateTime? @map("resolved_at")
+  resolution  String?
+
+  agent Agent @relation(fields: [agentId], references: [id])
+
+  @@index([agentId, detectedAt])
+  @@index([severity, detectedAt])
+  @@map("security_incidents")
+}
+
+model ThreatAssessmentRecord {
+  id                String   @id @default(cuid())
+  purchaseIntentId  String   @map("purchase_intent_id")
+  agentId           String   @map("agent_id")
+  score             Int
+  level             String   // ThreatLevel enum value
+  recommendedAction String   @map("recommended_action") // ThreatAction enum value
+  factors           String   @default("[]")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+  agent          Agent          @relation(fields: [agentId], references: [id])
+
+  @@index([agentId, createdAt])
+  @@map("threat_assessments")
+}
+
+model IdempotencyRecord {
+  id             String   @id @default(cuid())
+  idempotencyKey String   @unique @map("idempotency_key")
+  requestHash    String   @map("request_hash")
+  endpoint       String
+  resultData     String   @default("{}") @map("result_data")
+  status         String   @default("PROCESSING")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  @@index([idempotencyKey])
+  @@map("idempotency_records")
+}
+
+model ConsumedRequest {
+  id          String   @id @default(cuid())
+  agentId     String   @map("agent_id")
+  requestId   String   @map("request_id")
+  requestHash String   @map("request_hash")
+  consumedAt  DateTime @default(now()) @map("consumed_at")
+  expiresAt   DateTime @map("expires_at")
+
+  @@unique([agentId, requestId])
+  @@index([agentId, consumedAt])
+  @@map("consumed_requests")
 }

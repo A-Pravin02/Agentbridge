@@ -18,6 +18,7 @@
     "@agentbridge/audit": "*",
     "@agentbridge/policy-engine": "*",
     "@agentbridge/shared-types": "*",
+    "@agentbridge/threat-analyzer": "*",
     "@fastify/cors": "^11.3.0",
     "@prisma/client": "^6.10.1",
     "fastify": "^5.12.1"

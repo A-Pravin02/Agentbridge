@@ -1,10 +1,10 @@
 // ============================================
 // AgentBridge - Audit System
-// Tamper-evident audit chain
+// Tamper-evident audit chain using @agentbridge/audit
 // ============================================
 
-import { createHash } from 'crypto';
 import { prisma } from './db.js';
+import { computeAuditEventHash, serializeMetadata, verifyChainIntegrity, GENESIS_HASH } from '@agentbridge/audit';
 
 interface AuditInput {
   action: string;
@@ -25,13 +25,17 @@ export async function recordAuditEvent(input: AuditInput) {
     orderBy: { createdAt: 'desc' },
   });
 
-  const previousHash = lastEvent?.hash || 'GENESIS';
+  const previousHash = lastEvent?.hash || GENESIS_HASH;
   const timestamp = new Date().toISOString();
-  const metadataStr = JSON.stringify(input.metadata, Object.keys(input.metadata).sort());
+  const metadataStr = serializeMetadata(input.metadata);
 
-  // Create hash: action + timestamp + metadata + previousHash
-  const hashInput = `${input.action}|${timestamp}|${metadataStr}|${previousHash}`;
-  const hash = createHash('sha256').update(hashInput).digest('hex');
+  // Compute hash using pure @agentbridge/audit engine
+  const hash = computeAuditEventHash({
+    action: input.action,
+    timestamp,
+    metadata: metadataStr,
+    previousHash,
+  });
 
   const event = await prisma.auditEvent.create({
     data: {
@@ -49,32 +53,30 @@ export async function recordAuditEvent(input: AuditInput) {
 }
 
 /**
- * Verifies the integrity of the audit chain.
+ * Verifies the integrity of the audit chain using @agentbridge/audit.
  * Returns true if the chain is intact, false if tampered.
  */
 export async function verifyAuditChain(): Promise<{
   valid: boolean;
   totalEvents: number;
   brokenAt?: number;
+  reason?: string;
 }> {
   const events = await prisma.auditEvent.findMany({
     orderBy: { createdAt: 'asc' },
   });
 
-  if (events.length === 0) {
-    return { valid: true, totalEvents: 0 };
-  }
-
-  for (let i = 0; i < events.length; i++) {
-    const event = events[i];
-    const expectedPrevHash = i === 0 ? 'GENESIS' : events[i - 1].hash;
-
-    if (event.previousHash !== expectedPrevHash) {
-      return { valid: false, totalEvents: events.length, brokenAt: i };
-    }
-  }
-
-  return { valid: true, totalEvents: events.length };
+  return verifyChainIntegrity(events.map(e => ({
+    id: e.id,
+    action: e.action,
+    actorType: e.actorType,
+    actorId: e.actorId,
+    entityId: e.entityId,
+    metadata: e.metadata,
+    previousHash: e.previousHash,
+    hash: e.hash,
+    createdAt: e.createdAt,
+  })));
 }
 
 /**

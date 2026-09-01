@@ -1,6 +1,7 @@
 // ============================================
 // AgentBridge - Purchase Intent Routes
 // Create, evaluate, approve/deny, and execute purchases
+// Full 3-layer security integration
 // ============================================
 
 import { FastifyInstance } from 'fastify';
@@ -13,19 +14,55 @@ import {
   PolicyDecision,
   AuditAction,
   ActorType,
+  SecurityViolation,
 } from '@agentbridge/shared-types';
 import { recordAuditEvent } from '../audit.js';
+import {
+  checkAgentStatus,
+  validateTimestamp,
+  checkReplayProtection,
+  consumeRequestId,
+  checkIdempotency,
+  storeIdempotencyResult,
+  buildCanonicalRequest,
+  verifyAgentSignature,
+  hashRequestBody,
+} from '../integrity-service.js';
+import { performThreatAnalysis, isThreatAssessmentValid } from '../threat-service.js';
+import { recordSecurityIncident, quarantineAgent } from '../security-service.js';
+import { combineDecisions, decisionToPurchaseStatus } from '../decision-orchestrator.js';
+import { QuarantineTrigger } from '@agentbridge/shared-types';
 
 export async function purchaseRoutes(app: FastifyInstance) {
+  // ============================================
   // POST /purchase-intents - Create a new purchase intent
+  // ============================================
   app.post('/purchase-intents', async (request, reply) => {
-    const { agentId, productId, quantity, agentReason, merchantId } = request.body as {
+    const body = request.body as {
       agentId: string;
       productId: string;
       quantity?: number;
       agentReason: string;
       merchantId: string;
     };
+    const { agentId, productId, quantity, agentReason, merchantId } = body;
+
+    // ---- Layer 1: Agent Status Check ----
+    const statusCheck = await checkAgentStatus(agentId);
+    if (!statusCheck.passed) {
+      await recordAuditEvent({
+        action: AuditAction.REQUEST_BLOCKED_SECURITY,
+        actorType: ActorType.SYSTEM,
+        actorId: 'security-engine',
+        entityId: agentId,
+        metadata: { violation: statusCheck.violation, stage: 'purchase-intent-creation' },
+      });
+      return reply.status(403).send({
+        success: false,
+        error: statusCheck.message,
+        code: statusCheck.violation,
+      });
+    }
 
     // Validate product exists and has stock
     const product = await prisma.product.findUnique({ where: { id: productId } });
@@ -36,17 +73,12 @@ export async function purchaseRoutes(app: FastifyInstance) {
       return reply.status(400).send({ success: false, error: 'Product out of stock' });
     }
 
-    // Validate agent exists and is active
-    const agent = await prisma.agent.findUnique({ where: { id: agentId } });
-    if (!agent || agent.status !== 'ACTIVE') {
-      return reply.status(403).send({ success: false, error: 'Agent not found or inactive' });
-    }
-
     const amount = product.price * (quantity || 1);
 
     const intent = await prisma.purchaseIntent.create({
       data: {
-        merchantId: merchantId || product.merchantId,
+        // Always derive merchantId from the product record — never trust caller (GAP-05 fix)
+        merchantId: product.merchantId,
         agentId,
         productId,
         quantity: quantity || 1,
@@ -68,7 +100,9 @@ export async function purchaseRoutes(app: FastifyInstance) {
     return { success: true, data: intent };
   });
 
+  // ============================================
   // GET /purchase-intents/:id - Get purchase intent status
+  // ============================================
   app.get('/purchase-intents/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
 
@@ -79,6 +113,7 @@ export async function purchaseRoutes(app: FastifyInstance) {
         authorizations: true,
         approvals: true,
         transactions: true,
+        threatAssessments: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
     });
 
@@ -89,9 +124,13 @@ export async function purchaseRoutes(app: FastifyInstance) {
     return { success: true, data: intent };
   });
 
-  // POST /purchase-intents/:id/evaluate - Run policy engine
+  // ============================================
+  // POST /purchase-intents/:id/evaluate - Full 3-layer security evaluation
+  // ============================================
   app.post('/purchase-intents/:id/evaluate', async (request, reply) => {
     const { id } = request.params as { id: string };
+    const headers = request.headers as Record<string, string | undefined>;
+    const rawBody = JSON.stringify(request.body || {});
 
     const intent = await prisma.purchaseIntent.findUnique({
       where: { id },
@@ -102,8 +141,113 @@ export async function purchaseRoutes(app: FastifyInstance) {
       return reply.status(404).send({ success: false, error: 'Purchase intent not found' });
     }
 
-    // Validate state transition
+    // ---- Layer 1a: Agent Status Check ----
+    const statusCheck = await checkAgentStatus(intent.agentId);
+    if (!statusCheck.passed) {
+      await prisma.purchaseIntent.update({ where: { id }, data: { status: PurchaseStatus.BLOCKED } });
+      await recordAuditEvent({
+        action: AuditAction.REQUEST_BLOCKED_SECURITY,
+        actorType: ActorType.SYSTEM,
+        actorId: 'security-engine',
+        entityId: id,
+        metadata: { violation: statusCheck.violation, agentId: intent.agentId },
+      });
+      return reply.status(403).send({
+        success: false,
+        error: statusCheck.message,
+        decision: 'BLOCK',
+        code: statusCheck.violation,
+      });
+    }
+
+    // ---- Layer 1b: Timestamp Validation ----
+    const tsCheck = validateTimestamp(headers['x-timestamp']);
+    if (!tsCheck.passed) {
+      await recordSecurityIncident(
+        intent.agentId,
+        SecurityViolation.EXPIRED_REQUEST,
+        'Request timestamp validation failed',
+        { purchaseIntentId: id }
+      );
+      return reply.status(400).send({
+        success: false,
+        error: 'Request integrity check failed',
+        decision: 'BLOCK',
+      });
+    }
+
+    // ---- Layer 1c: Replay Protection ----
+    const requestId = headers['x-request-id'];
+    if (requestId) {
+      const requestHash = hashRequestBody(request.body);
+      const replayCheck = await checkReplayProtection(intent.agentId, requestId, requestHash);
+      if (!replayCheck.passed) {
+        await recordSecurityIncident(
+          intent.agentId,
+          SecurityViolation.REPLAY_ATTACK,
+          'Replay attack detected on purchase evaluation',
+          { purchaseIntentId: id, requestId }
+        );
+        await recordAuditEvent({
+          action: AuditAction.REPLAY_ATTACK_DETECTED,
+          actorType: ActorType.SYSTEM,
+          actorId: 'security-engine',
+          entityId: id,
+          metadata: { agentId: intent.agentId },
+        });
+        return reply.status(400).send({
+          success: false,
+          error: 'Request integrity check failed',
+          decision: 'BLOCK',
+        });
+      }
+    }
+
+    // ---- Layer 1d: HMAC Signature Verification ----
+    if (requestId && headers['x-timestamp']) {
+      const canonicalReq = buildCanonicalRequest(
+        intent.agentId,
+        requestId,
+        headers['x-timestamp']!,
+        'POST',
+        `/api/purchase-intents/${id}/evaluate`,
+        rawBody
+      );
+      const sigCheck = await verifyAgentSignature(
+        intent.agentId,
+        canonicalReq,
+        headers['x-agent-signature']
+      );
+      if (!sigCheck.passed) {
+        await recordSecurityIncident(
+          intent.agentId,
+          SecurityViolation.INVALID_REQUEST_SIGNATURE,
+          'HMAC signature verification failed',
+          { purchaseIntentId: id }
+        );
+        await recordAuditEvent({
+          action: AuditAction.SECURITY_VIOLATION_DETECTED,
+          actorType: ActorType.SYSTEM,
+          actorId: 'security-engine',
+          entityId: id,
+          metadata: { violation: SecurityViolation.INVALID_REQUEST_SIGNATURE, agentId: intent.agentId },
+        });
+        return reply.status(403).send({
+          success: false,
+          error: 'Request integrity check failed',
+          decision: 'BLOCK',
+        });
+      }
+    }
+
+    // ---- State Machine Check ----
     if (!canTransition(intent.status as PurchaseStatus, PurchaseStatus.EVALUATING)) {
+      await recordSecurityIncident(
+        intent.agentId,
+        SecurityViolation.INVALID_STATE_TRANSITION,
+        `Invalid state transition attempt: ${intent.status} → EVALUATING`,
+        { purchaseIntentId: id, currentStatus: intent.status }
+      );
       return reply.status(400).send({
         success: false,
         error: `Cannot evaluate from state: ${intent.status}`,
@@ -116,16 +260,13 @@ export async function purchaseRoutes(app: FastifyInstance) {
       data: { status: PurchaseStatus.EVALUATING },
     });
 
-    // Get agent permission
+    // ---- Get agent permission ----
     const agentPermission = await prisma.agentPermission.findFirst({
       where: { agentId: intent.agentId },
     });
 
     if (!agentPermission) {
-      await prisma.purchaseIntent.update({
-        where: { id },
-        data: { status: PurchaseStatus.BLOCKED },
-      });
+      await prisma.purchaseIntent.update({ where: { id }, data: { status: PurchaseStatus.BLOCKED } });
       return reply.status(403).send({
         success: false,
         error: 'No agent permission found',
@@ -133,7 +274,7 @@ export async function purchaseRoutes(app: FastifyInstance) {
       });
     }
 
-    // Get merchant policy
+    // ---- Get merchant policy ----
     const merchantPolicy = await prisma.policy.findFirst({
       where: { merchantId: intent.merchantId },
     });
@@ -142,7 +283,36 @@ export async function purchaseRoutes(app: FastifyInstance) {
       return reply.status(400).send({ success: false, error: 'No merchant policy found' });
     }
 
-    // Get daily spending totals
+    // ---- Layer 2: Behavioral Threat Analysis ----
+    const agentMaxTransaction = Math.min(
+      merchantPolicy.maxTransactionAmount,
+      agentPermission.maxTransactionAmount
+    );
+    const threatAssessment = await performThreatAnalysis(
+      intent.agentId,
+      id,
+      intent.amount,
+      intent.product.category,
+      agentMaxTransaction
+    );
+
+    // Check if agent was just quarantined by threat analysis
+    const freshStatusCheck = await checkAgentStatus(intent.agentId);
+    if (!freshStatusCheck.passed) {
+      await prisma.purchaseIntent.update({ where: { id }, data: { status: PurchaseStatus.BLOCKED } });
+      return reply.status(403).send({
+        success: false,
+        error: 'Agent has been suspended pending security review',
+        decision: 'BLOCK',
+        threatAssessment: {
+          score: threatAssessment.score,
+          level: threatAssessment.level,
+          factors: threatAssessment.factors,
+        },
+      });
+    }
+
+    // ---- Get daily spending totals ----
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -157,8 +327,8 @@ export async function purchaseRoutes(app: FastifyInstance) {
     const dailySpent = dailyIntents.reduce((sum, i) => sum + i.amount, 0);
     const dailyTransactionCount = dailyIntents.length;
 
-    // Build policy context
-    const context: PolicyContext = {
+    // ---- Layer 3: Policy Engine ----
+    const policyContext: PolicyContext = {
       request: {
         merchantId: intent.merchantId,
         agentId: intent.agentId,
@@ -197,50 +367,48 @@ export async function purchaseRoutes(app: FastifyInstance) {
       dailyTransactionCount,
     };
 
-    // EVALUATE
-    const result = evaluatePolicy(context);
+    const policyResult = evaluatePolicy(policyContext);
 
-    // Record audit
     await recordAuditEvent({
       action: AuditAction.POLICY_EVALUATED,
       actorType: ActorType.SYSTEM,
       actorId: 'policy-engine',
-      entityId: intent.id,
+      entityId: id,
       metadata: {
-        decision: result.decision,
-        reasons: result.reasons,
-        violations: result.violations,
+        decision: policyResult.decision,
+        reasons: policyResult.reasons,
+        violations: policyResult.violations,
         amount: intent.amount,
       },
     });
 
-    // Map decision to purchase status
-    let newStatus: PurchaseStatus;
-    let auditAction: AuditAction;
+    // ---- Decision Orchestrator: Combine all signals ----
+    const combined = combineDecisions({
+      agentStatusCheck: { passed: true, message: 'Agent active' },
+      integrityCheck: { passed: true, message: 'Integrity verified' },
+      permissionCheck: { passed: true, message: 'Permission valid' },
+      threatAssessment,
+      policyResult,
+    });
 
-    switch (result.decision) {
-      case PolicyDecision.ALLOW:
-        newStatus = PurchaseStatus.AUTHORIZED;
-        auditAction = AuditAction.PURCHASE_ALLOWED;
-        break;
-      case PolicyDecision.REQUIRE_APPROVAL:
-        newStatus = PurchaseStatus.REQUIRE_APPROVAL;
-        auditAction = AuditAction.APPROVAL_REQUESTED;
-        break;
-      case PolicyDecision.BLOCK:
-        newStatus = PurchaseStatus.BLOCKED;
-        auditAction = AuditAction.PURCHASE_BLOCKED;
-        break;
+    // ---- Apply quarantine if needed ----
+    if (combined.shouldQuarantine) {
+      await quarantineAgent(
+        intent.agentId,
+        `Critical behavioral threat during purchase evaluation`,
+        QuarantineTrigger.AUTOMATIC_THREAT_DETECTION
+      );
     }
 
-    // Update status
+    // ---- Map to purchase status ----
+    const newStatus = decisionToPurchaseStatus(combined) as PurchaseStatus;
     const updated = await prisma.purchaseIntent.update({
       where: { id },
       data: { status: newStatus },
       include: { product: true },
     });
 
-    // Create authorization record
+    // ---- Create authorization record ----
     const policySnapshot = {
       maxTransactionAmount: merchantPolicy.maxTransactionAmount,
       maxDailyAmount: merchantPolicy.maxDailyAmount,
@@ -255,31 +423,49 @@ export async function purchaseRoutes(app: FastifyInstance) {
     const authorization = await prisma.authorization.create({
       data: {
         purchaseIntentId: id,
-        decision: result.decision,
-        reasons: JSON.stringify(result.reasons),
+        decision: combined.finalDecision === 'ALLOW'
+          ? PolicyDecision.ALLOW
+          : combined.finalDecision === 'REQUIRE_APPROVAL'
+          ? PolicyDecision.REQUIRE_APPROVAL
+          : PolicyDecision.BLOCK,
+        reasons: JSON.stringify(combined.reasons),
         policySnapshot: JSON.stringify(policySnapshot),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min expiry
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
       },
     });
 
-    // Create approval record if needed
-    if (result.decision === PolicyDecision.REQUIRE_APPROVAL) {
+    if (combined.finalDecision === 'REQUIRE_APPROVAL') {
       await prisma.approval.create({
-        data: {
-          purchaseIntentId: id,
-          status: 'PENDING',
-        },
+        data: { purchaseIntentId: id, status: 'PENDING' },
       });
     }
 
-    // Record decision audit
+    // ---- Audit final decision ----
+    const decisionAuditAction =
+      combined.finalDecision === 'ALLOW'
+        ? AuditAction.PURCHASE_ALLOWED
+        : combined.finalDecision === 'REQUIRE_APPROVAL'
+        ? AuditAction.APPROVAL_REQUESTED
+        : AuditAction.PURCHASE_BLOCKED;
+
     await recordAuditEvent({
-      action: auditAction,
+      action: decisionAuditAction,
       actorType: ActorType.SYSTEM,
-      actorId: 'policy-engine',
-      entityId: intent.id,
-      metadata: { decision: result.decision, amount: intent.amount },
+      actorId: 'decision-orchestrator',
+      entityId: id,
+      metadata: {
+        decision: combined.finalDecision,
+        amount: intent.amount,
+        threatScore: threatAssessment.score,
+        threatLevel: threatAssessment.level,
+        quarantined: combined.shouldQuarantine,
+      },
     });
+
+    // Mark request ID as consumed (replay protection)
+    if (requestId) {
+      await consumeRequestId(intent.agentId, requestId, hashRequestBody(request.body));
+    }
 
     return {
       success: true,
@@ -287,15 +473,27 @@ export async function purchaseRoutes(app: FastifyInstance) {
         purchaseIntent: updated,
         authorization: {
           ...authorization,
-          reasons: result.reasons,
+          reasons: combined.reasons,
           policySnapshot,
         },
-        policyResult: result,
+        policyResult,
+        riskAssessment: {
+          score: threatAssessment.score,
+          level: threatAssessment.level,
+          recommendedAction: threatAssessment.recommendedAction,
+          factors: threatAssessment.factors,
+          analyzedAt: threatAssessment.analyzedAt,
+        },
+        finalDecision: combined.finalDecision,
+        finalReasons: combined.reasons,
+        agentQuarantined: combined.shouldQuarantine,
       },
     };
   });
 
+  // ============================================
   // POST /purchase-intents/:id/approve - Merchant approves
+  // ============================================
   app.post('/purchase-intents/:id/approve', async (request, reply) => {
     const { id } = request.params as { id: string };
     const { approvedBy } = request.body as { approvedBy?: string };
@@ -312,18 +510,12 @@ export async function purchaseRoutes(app: FastifyInstance) {
       });
     }
 
-    // Update approval
     await prisma.approval.updateMany({
       where: { purchaseIntentId: id, status: 'PENDING' },
       data: { status: 'APPROVED', approvedBy: approvedBy || 'merchant', approvedAt: new Date() },
     });
 
-    // Transition: REQUIRE_APPROVAL → APPROVED → AUTHORIZED
-    await prisma.purchaseIntent.update({
-      where: { id },
-      data: { status: PurchaseStatus.APPROVED },
-    });
-
+    await prisma.purchaseIntent.update({ where: { id }, data: { status: PurchaseStatus.APPROVED } });
     const updated = await prisma.purchaseIntent.update({
       where: { id },
       data: { status: PurchaseStatus.AUTHORIZED },
@@ -341,7 +533,9 @@ export async function purchaseRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  // ============================================
   // POST /purchase-intents/:id/deny - Merchant denies
+  // ============================================
   app.post('/purchase-intents/:id/deny', async (request, reply) => {
     const { id } = request.params as { id: string };
     const { deniedBy } = request.body as { deniedBy?: string };
@@ -380,9 +574,48 @@ export async function purchaseRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  // POST /purchase-intents/:id/execute - Execute payment
+  // ============================================
+  // POST /purchase-intents/:id/execute - Execute payment (with pre-payment revalidation)
+  // ============================================
   app.post('/purchase-intents/:id/execute', async (request, reply) => {
     const { id } = request.params as { id: string };
+    const headers = request.headers as Record<string, string | undefined>;
+    const idempotencyKey = headers['idempotency-key'];
+
+    // ---- Idempotency Check ----
+    if (idempotencyKey) {
+      const requestHash = hashRequestBody(request.body);
+      const idempotencyResult = await checkIdempotency(idempotencyKey, requestHash, `/execute`);
+
+      if (idempotencyResult.result === 'EXISTING') {
+        // Safe retry — return original result without re-processing
+        return { success: true, data: idempotencyResult.existingData, idempotent: true };
+      }
+
+      if (idempotencyResult.result === 'CONFLICT') {
+        const intent = await prisma.purchaseIntent.findUnique({ where: { id } });
+        if (intent) {
+          await recordSecurityIncident(
+            intent.agentId,
+            SecurityViolation.IDEMPOTENCY_CONFLICT,
+            'Idempotency key reused with different payload on execute',
+            { purchaseIntentId: id, idempotencyKey }
+          );
+          await recordAuditEvent({
+            action: AuditAction.IDEMPOTENCY_CONFLICT_DETECTED,
+            actorType: ActorType.SYSTEM,
+            actorId: 'security-engine',
+            entityId: id,
+            metadata: { agentId: intent.agentId },
+          });
+        }
+        return reply.status(409).send({
+          success: false,
+          error: 'Request integrity check failed',
+          code: SecurityViolation.IDEMPOTENCY_CONFLICT,
+        });
+      }
+    }
 
     const intent = await prisma.purchaseIntent.findUnique({
       where: { id },
@@ -393,7 +626,19 @@ export async function purchaseRoutes(app: FastifyInstance) {
       return reply.status(404).send({ success: false, error: 'Purchase intent not found' });
     }
 
-    // Must be AUTHORIZED
+    // ---- Pre-payment Revalidation ----
+
+    // 1. Agent must still exist and be ACTIVE
+    const statusCheck = await checkAgentStatus(intent.agentId);
+    if (!statusCheck.passed) {
+      return reply.status(403).send({
+        success: false,
+        error: 'Agent access revoked — cannot execute payment',
+        code: statusCheck.violation,
+      });
+    }
+
+    // 2. Must be AUTHORIZED
     if (intent.status !== PurchaseStatus.AUTHORIZED) {
       return reply.status(400).send({
         success: false,
@@ -401,7 +646,7 @@ export async function purchaseRoutes(app: FastifyInstance) {
       });
     }
 
-    // Check authorization hasn't expired
+    // 3. Authorization must not be expired
     const auth = intent.authorizations[intent.authorizations.length - 1];
     if (!auth || new Date(auth.expiresAt) < new Date()) {
       return reply.status(400).send({
@@ -410,18 +655,51 @@ export async function purchaseRoutes(app: FastifyInstance) {
       });
     }
 
-    // Check stock
+    // 4. Threat assessment validity check (5-minute window)
+    const { valid: threatValid } = await isThreatAssessmentValid(id);
+    if (!threatValid) {
+      // Re-analyze — agent behavior may have changed since authorization
+      const agentPermission = await prisma.agentPermission.findFirst({
+        where: { agentId: intent.agentId },
+      });
+      const merchantPolicy = await prisma.policy.findFirst({
+        where: { merchantId: intent.merchantId },
+      });
+      const agentMaxTransaction = Math.min(
+        merchantPolicy?.maxTransactionAmount ?? 0,
+        agentPermission?.maxTransactionAmount ?? 0
+      );
+
+      const freshThreat = await performThreatAnalysis(
+        intent.agentId,
+        id,
+        intent.amount,
+        intent.product.category,
+        agentMaxTransaction
+      );
+
+      // If now CRITICAL → quarantine and block
+      if (freshThreat.recommendedAction === 'QUARANTINE_AGENT') {
+        return reply.status(403).send({
+          success: false,
+          error: 'Agent behavior has escalated — payment blocked',
+          threatAssessment: { score: freshThreat.score, level: freshThreat.level },
+        });
+      }
+    }
+
+    // 5. Check stock
     if (intent.product.stock < intent.quantity) {
       return reply.status(400).send({ success: false, error: 'Product out of stock' });
     }
 
-    // Reserve stock
+    // ---- Reserve stock ----
     await prisma.product.update({
       where: { id: intent.productId },
       data: { stock: { decrement: intent.quantity } },
     });
 
-    // Create transaction
+    // ---- Create transaction ----
     const transaction = await prisma.transaction.create({
       data: {
         purchaseIntentId: id,
@@ -432,7 +710,6 @@ export async function purchaseRoutes(app: FastifyInstance) {
       },
     });
 
-    // Update to PAYMENT_PENDING
     const updated = await prisma.purchaseIntent.update({
       where: { id },
       data: { status: PurchaseStatus.PAYMENT_PENDING },
@@ -447,16 +724,19 @@ export async function purchaseRoutes(app: FastifyInstance) {
       metadata: { transactionId: transaction.id, amount: intent.amount },
     });
 
-    return {
-      success: true,
-      data: {
-        purchaseIntent: updated,
-        transaction,
-      },
-    };
+    const result = { purchaseIntent: updated, transaction };
+
+    // Store idempotency result
+    if (idempotencyKey) {
+      await storeIdempotencyResult(idempotencyKey, hashRequestBody(request.body), '/execute', result);
+    }
+
+    return { success: true, data: result };
   });
 
-  // POST /purchase-intents/:id/complete - Simulate payment completion (for demo)
+  // ============================================
+  // POST /purchase-intents/:id/complete - Server-controlled payment completion
+  // ============================================
   app.post('/purchase-intents/:id/complete', async (request, reply) => {
     const { id } = request.params as { id: string };
     const { providerPaymentId } = request.body as { providerPaymentId?: string };
@@ -470,6 +750,8 @@ export async function purchaseRoutes(app: FastifyInstance) {
       return reply.status(404).send({ success: false, error: 'Purchase intent not found' });
     }
 
+    // ---- Secure Completion: Server-side validation ----
+    // 1. Must be in PAYMENT_PENDING state
     if (intent.status !== PurchaseStatus.PAYMENT_PENDING) {
       return reply.status(400).send({
         success: false,
@@ -477,20 +759,35 @@ export async function purchaseRoutes(app: FastifyInstance) {
       });
     }
 
-    // Update transaction
+    // 2. Must have an existing transaction record (created by execute endpoint)
     const tx = intent.transactions[intent.transactions.length - 1];
-    if (tx) {
-      await prisma.transaction.update({
-        where: { id: tx.id },
-        data: {
-          status: 'COMPLETED',
-          providerPaymentId: providerPaymentId || `pay_test_${Date.now()}`,
-          providerOrderId: `order_test_${Date.now()}`,
-        },
+    if (!tx) {
+      return reply.status(400).send({
+        success: false,
+        error: 'No payment transaction found. Call /execute first.',
       });
     }
 
-    // PAYMENT_PENDING → PAYMENT_PROCESSING → COMPLETED
+    // 3. Transaction must belong to this purchase intent (ownership check)
+    if (tx.purchaseIntentId !== id) {
+      return reply.status(403).send({ success: false, error: 'Transaction ownership mismatch' });
+    }
+
+    // 4. Transaction must be in PENDING status (not already completed)
+    if (tx.status === 'COMPLETED') {
+      return reply.status(400).send({ success: false, error: 'Transaction already completed' });
+    }
+
+    // ---- Update transaction ----
+    await prisma.transaction.update({
+      where: { id: tx.id },
+      data: {
+        status: 'COMPLETED',
+        providerPaymentId: providerPaymentId || `pay_test_${Date.now()}`,
+        providerOrderId: `order_test_${Date.now()}`,
+      },
+    });
+
     await prisma.purchaseIntent.update({
       where: { id },
       data: { status: PurchaseStatus.PAYMENT_PROCESSING },
