@@ -49,3 +49,6 @@ apps/api/prisma/migrations/
 
 # Local scratch: Neon test-branch connection string
 .pg-test-url
+
+# Local scratch
+.prod-url
