@@ -320,8 +320,11 @@ export async function evaluatePurchaseIntent(
 
   const humanReason = ledgerReason ?? policyResult.humanReadableReason;
 
-  const { authorizationId, approvalToken, approvalExpiresAt } = await prisma.$transaction(
-    async (tx) => {
+  // If the transaction below fails after a successful reservation, the budget
+  // would be held for a purchase that never exists. Release it rather than
+  // silently shrinking the agent's remaining headroom.
+  const persist = () =>
+    prisma.$transaction(async (tx) => {
       await transitionIntent(tx, intentId, PurchaseStatus.EVALUATING, finalStatus, {
         budgetHeld: reservedDay !== null,
         ledgerDay: reservedDay,
@@ -351,8 +354,22 @@ export async function evaluatePurchaseIntent(
       }
 
       return { authorizationId: authorization.id, approvalToken: token, approvalExpiresAt: expiresAt };
+    });
+
+  let persisted: Awaited<ReturnType<typeof persist>>;
+  try {
+    persisted = await persist();
+  } catch (error) {
+    if (reservedDay) {
+      await releaseBudget({
+        agentId,
+        day: reservedDay,
+        amountMinor: intent.amountMinor,
+      }).catch(() => undefined);
     }
-  );
+    throw error;
+  }
+  const { authorizationId, approvalToken, approvalExpiresAt } = persisted;
 
   await recordAuditEvent({
     action:

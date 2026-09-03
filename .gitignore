@@ -21,9 +21,13 @@ out/
 .DS_Store
 Thumbs.db
 
-# Prisma
-prisma/*.db
-prisma/*.db-journal
+# Prisma — patterns containing a slash are anchored to the repo root, so the
+# previous `prisma/*.db` never matched apps/api/prisma/dev.db and the database
+# was committed. Un-anchored patterns match at any depth.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Logs
 *.log

@@ -7,7 +7,7 @@ import { ActorType, AuditAction, formatMinor, type Currency } from '@agentbridge
 import { prisma } from '../db.js';
 import { getConfig } from '../config.js';
 import { productQuerySchema } from '../schemas.js';
-import { authenticateAgent } from '../plugins/auth.js';
+import { authenticateAgent, authenticateMerchantUser } from '../plugins/auth.js';
 import { purchaseIntentRoutes } from './purchase-intents.js';
 import { merchantRoutes } from './merchant.js';
 import { demoRoutes } from './demo.js';
@@ -140,9 +140,18 @@ export async function registerRoutes(app: FastifyInstance) {
     return reply.status(200).send({ success: true, data: result });
   });
 
-  // ---- Demo (development only; refused in production by config) ----
+  // ---- Demo (development only; the config loader refuses to boot in
+  // production with these enabled) ----
+  //
+  // Still requires a merchant session. The demo routes mutate real agent state,
+  // so leaving them open would hand an unauthenticated caller the ability to
+  // clear an agent's quarantine — which was exactly finding E-6 of the Phase 0
+  // audit against the previous build.
   if (config.ENABLE_DEMO_ROUTES) {
-    await app.register(demoRoutes, { prefix: '/demo' });
+    await app.register(async (demo) => {
+      demo.addHook('preHandler', authenticateMerchantUser);
+      await demo.register(demoRoutes);
+    }, { prefix: '/demo' });
   }
 }
 

@@ -409,7 +409,38 @@ export async function merchantRoutes(app: FastifyInstance) {
 
     secured.get('/audit/events', async (request) => {
       const { limit } = paginationSchema.parse(request.query ?? {});
+      const user = request.merchantUser!;
+
+      // TENANT SCOPING. The audit chain is global — it has to be, or the hash
+      // linkage would not be verifiable — but a merchant must only ever see
+      // its OWN entries. Events are addressed by entityId, so the scope is the
+      // set of entity ids this merchant owns.
+      const [agents, intents, policy] = await Promise.all([
+        prisma.agent.findMany({
+          where: { merchantId: user.merchantId },
+          select: { id: true },
+        }),
+        prisma.purchaseIntent.findMany({
+          where: { merchantId: user.merchantId },
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+          select: { id: true },
+        }),
+        prisma.policy.findUnique({
+          where: { merchantId: user.merchantId },
+          select: { id: true },
+        }),
+      ]);
+
+      const scope = [
+        user.merchantId,
+        ...agents.map((a) => a.id),
+        ...intents.map((i) => i.id),
+        ...(policy ? [policy.id] : []),
+      ];
+
       const events = await prisma.auditEvent.findMany({
+        where: { entityId: { in: scope } },
         orderBy: { sequence: 'desc' },
         take: limit,
       });

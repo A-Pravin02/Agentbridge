@@ -619,6 +619,87 @@ describe('webhooks', () => {
   });
 });
 
+describe('audit access control', () => {
+  // Regression: /api/audit/events returned the GLOBAL chain to any authenticated
+  // merchant, exposing other tenants' actions, entity ids and amounts.
+  it("never returns another tenant's audit events", async () => {
+    const other = await createWorld();
+    try {
+      const { recordAuditEvent } = await import('../src/services/audit-service.js');
+      await recordAuditEvent({
+        action: 'PURCHASE_INTENT_CREATED',
+        actorType: 'AGENT',
+        actorId: other.agent.agentId,
+        entityId: other.merchantId,
+        metadata: { note: 'OTHER_TENANT_CONFIDENTIAL' },
+      });
+
+      const res = await callAsOwner(world, 'GET', '/api/audit/events');
+      expect(JSON.stringify(res.body)).not.toContain('OTHER_TENANT_CONFIDENTIAL');
+      expect(JSON.stringify(res.body)).not.toContain(other.merchantId);
+    } finally {
+      await other.app.close();
+    }
+  });
+
+  it("still returns the tenant's own audit events", async () => {
+    const w = await createWorld();
+    try {
+      await createAndEvaluate(w, 'cheap');
+      const res = await callAsOwner(w, 'GET', '/api/audit/events');
+      const actions = (res.body.data as Array<{ action: string }>).map((e) => e.action);
+      expect(actions).toContain('POLICY_EVALUATED');
+    } finally {
+      await w.app.close();
+    }
+  });
+});
+
+describe('budget ledger integrity', () => {
+  // Regression: a reservation taken before the persisting transaction was not
+  // released if that transaction failed, silently shrinking the agent's
+  // remaining headroom for a purchase that never existed.
+  it('never holds budget for a purchase that does not exist', async () => {
+    const w = await createWorld();
+    try {
+      const { prisma } = await import('../src/db.js');
+      await createAndEvaluate(w, 'cheap');
+
+      const ledger = await prisma.agentDailyLedger.findFirstOrThrow({
+        where: { agentId: w.agent.agentId },
+      });
+      const held = await prisma.purchaseIntent.aggregate({
+        where: { agentId: w.agent.agentId, budgetHeld: true },
+        _sum: { amountMinor: true },
+      });
+      // Every reserved paisa is accounted for by an intent that still holds it.
+      expect(ledger.reservedMinor).toBe(held._sum.amountMinor ?? 0);
+    } finally {
+      await w.app.close();
+    }
+  });
+
+  it('releases budget when a payment fails verification', async () => {
+    const w = await createWorld();
+    try {
+      const { intentId } = await createAndEvaluate(w, 'cheap');
+      await callAsAgent(w, 'POST', `/api/purchase-intents/${intentId}/payment-order`, {});
+      await callAsAgent(w, 'POST', `/api/purchase-intents/${intentId}/verify-payment`, {
+        providerPaymentId: 'pay_never_paid',
+        signature: 'f'.repeat(64),
+      });
+
+      const { prisma } = await import('../src/db.js');
+      const ledger = await prisma.agentDailyLedger.findFirstOrThrow({
+        where: { agentId: w.agent.agentId },
+      });
+      expect(ledger.reservedMinor).toBe(0);
+    } finally {
+      await w.app.close();
+    }
+  });
+});
+
 describe('information disclosure', () => {
   it('never returns a private key or password hash', async () => {
     const res = await callAsOwner(world, 'GET', '/api/agents');
@@ -646,6 +727,31 @@ describe('information disclosure', () => {
 });
 
 describe('rate limiting', () => {
+  // Regression: the limiter was originally keyed on X-Agent-Key-Id, which runs
+  // BEFORE authentication and is therefore attacker-controlled. Varying the
+  // header gave a fresh bucket per request and the limiter did nothing at all
+  // (15/15 passed a limit of 5). It is now keyed on IP.
+  it('cannot be bypassed by varying an attacker-controlled header', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    const { buildServer } = await import('../src/server.js');
+    const app = await buildServer(loadConfig({ ...process.env, RATE_LIMIT_MAX: '5' } as never));
+    await app.ready();
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 15; i++) {
+        const res = await app.inject({
+          method: 'GET',
+          url: '/api/health',
+          headers: { 'x-agent-key-id': `ak_${Math.random().toString(36).slice(2)}` },
+        });
+        codes.push(res.statusCode);
+      }
+      expect(codes).toContain(429);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('limits unauthenticated request floods', async () => {
     const { loadConfig } = await import('../src/config.js');
     const { buildServer } = await import('../src/server.js');

@@ -592,6 +592,11 @@ export async function demoRoutes(app: FastifyInstance) {
       },
     });
 
+    // The escalation scenario deliberately leaves the agent quarantined. Restore
+    // it so the console can be run again, and so the rest of the demo (dashboard,
+    // MCP agent) keeps working immediately afterwards.
+    await isolate();
+
     const attacks = results.filter((r) => r.attack);
     return {
       success: true,

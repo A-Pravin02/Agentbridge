@@ -1,91 +1,268 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// ============================================
+// AgentBridge - Dashboard API Client
+// ============================================
+// The dashboard authenticates as a MERCHANT USER with a session token.
+//
+// There is deliberately no admin key here. The Phase 0 audit found the previous
+// build shipped `NEXT_PUBLIC_ADMIN_KEY` into the browser bundle, which made a
+// privileged credential readable by anyone who opened devtools. The dashboard
+// now holds only a short-lived session token obtained by logging in, and it can
+// do exactly what that user's role permits.
 
-// Admin API key — matches ADMIN_API_KEY env var on server
-// In a real deployment this would come from a secure session/token
-const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_KEY || 'dev-admin-key-change-in-production';
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+const TOKEN_KEY = 'agentbridge.session';
 
-export async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  });
-  
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(error.error || `API error: ${res.status}`);
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(status: number, message: string, code?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
   }
-  
-  return res.json();
 }
 
-// Admin fetch — includes X-Admin-Key header for protected endpoints
-export async function fetchAdminAPI<T>(path: string, options?: RequestInit): Promise<T> {
-  return fetchAPI<T>(path, {
-    ...options,
+export function getToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) window.localStorage.setItem(TOKEN_KEY, token);
+    else window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable (private mode) — the session simply won't persist */
+  }
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const res = await fetch(`${API_URL}${path}`, {
+    ...init,
     headers: {
-      'x-admin-key': ADMIN_KEY,
-      ...options?.headers,
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init.headers,
     },
   });
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiError(res.status, body.error ?? `Request failed (${res.status})`, body.code);
+  }
+  return body.data as T;
+}
+
+// ---- Types mirroring the API responses ----
+
+export interface SessionUser {
+  id: string;
+  email: string;
+  role: string;
+  merchantId: string;
+}
+
+export interface Stats {
+  totalIntents: number;
+  byStatus: Record<string, number>;
+  completedValueMinor: number;
+  completedValueDisplay: string;
+  agents: number;
+  pendingApprovals: number;
+  securityIncidents24h: number;
+  auditChain: { valid: boolean; totalEvents: number; reason?: string };
+}
+
+export interface TransactionRow {
+  id: string;
+  status: string;
+  amountMinor: number;
+  amountDisplay: string;
+  product: { name: string; category: string };
+  agent: { id: string; name: string };
+  decision: string | null;
+  reason: string | null;
+  riskScore: number | null;
+  paymentStatus: string | null;
+  createdAt: string;
+}
+
+export interface EvaluatedRule {
+  rule: string;
+  outcome: string;
+  passed: boolean;
+  reasonCode: string;
+  message: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface Timeline {
+  intent: {
+    id: string;
+    status: string;
+    amountDisplay: string;
+    quantity: number;
+    agentReason: string;
+    product: { name: string; category: string; priceMinor: number };
+    agent: { id: string; name: string };
+  };
+  decision: {
+    decision: string;
+    reasonCode: string;
+    reason: string;
+    policyVersion: number;
+    decisionId: string;
+    evaluatedRules: EvaluatedRule[];
+  } | null;
+  risk: { score: number; level: string; factors: Array<{ rule: string; points: number; message: string }> } | null;
+  payment: {
+    status: string;
+    providerOrderId: string;
+    providerPaymentId: string | null;
+    verifiedAt: string | null;
+  } | null;
+  timeline: Array<{
+    sequence: number;
+    action: string;
+    actorType: string;
+    actorId: string;
+    timestamp: string;
+    metadata: Record<string, unknown>;
+    hash: string;
+  }>;
+  integrity: { valid: boolean; reason?: string };
+}
+
+export interface PendingApproval {
+  approvalId: string;
+  purchaseIntentId: string;
+  expiresAt: string;
+  agent: { id: string; name: string };
+  product: { id: string; name: string; category: string };
+  amountMinor: number;
+  amountDisplay: string;
+  agentReason: string;
+}
+
+export interface AgentRow {
+  id: string;
+  name: string;
+  status: string;
+  keyId: string;
+  quarantineReason: string | null;
+  securityViolationCount: number;
+  severeThreatCount: number;
+  permission: {
+    allowedCategories: string[];
+    maxTransactionMinor: number;
+    maxTransactionDisplay: string;
+    maxDailyMinor: number;
+    maxDailyDisplay: string;
+    maxTransactionsPerDay: number;
+  } | null;
+  usageToday: {
+    spentMinor: number;
+    spentDisplay: string;
+    transactionCount: number;
+    remainingMinor: number;
+  };
+}
+
+export interface Policy {
+  id: string;
+  version: number;
+  maxTransactionMinor: number;
+  maxDailyMinor: number;
+  maxTransactionsPerDay: number;
+  allowedCategories: string[];
+  allowedCurrencies: string[];
+  approvalThresholdMinor: number;
+  riskBlockThreshold: number;
+  riskApprovalThreshold: number;
+}
+
+export interface AuditRow {
+  sequence: number;
+  action: string;
+  actorType: string;
+  actorId: string;
+  entityId: string;
+  timestamp: string;
+  metadata: Record<string, unknown>;
+  hash: string;
+  previousHash: string;
+}
+
+export interface ScenarioResult {
+  id: string;
+  title: string;
+  description: string;
+  attack: boolean;
+  expected: string;
+  actual: string;
+  detail: string;
+  passed: boolean;
+  durationMs: number;
+}
+
+export interface DemoRun {
+  results: ScenarioResult[];
+  summary: {
+    total: number;
+    passed: number;
+    attacksAttempted: number;
+    attacksStopped: number;
+  };
 }
 
 export const api = {
-  // Products
-  getProducts: () => fetchAPI<any>('/api/products'),
-  searchProducts: (query: string, maxPrice?: number) => 
-    fetchAPI<any>(`/api/products/search?query=${encodeURIComponent(query)}${maxPrice ? `&maxPrice=${maxPrice}` : ''}`),
-  
-  // Dashboard
-  getStats: () => fetchAPI<any>('/api/dashboard/stats'),
-  
-  // Purchase Intents
-  createPurchaseIntent: (data: any) => 
-    fetchAPI<any>('/api/purchase-intents', { method: 'POST', body: JSON.stringify(data) }),
-  evaluatePurchase: (id: string) => 
-    fetchAPI<any>(`/api/purchase-intents/${id}/evaluate`, { method: 'POST', body: '{}' }),
-  executePurchase: (id: string) =>
-    fetchAPI<any>(`/api/purchase-intents/${id}/execute`, { method: 'POST', body: '{}' }),
-  completePurchase: (id: string) =>
-    fetchAPI<any>(`/api/purchase-intents/${id}/complete`, { method: 'POST', body: '{}' }),
-  approvePurchase: (id: string) =>
-    fetchAdminAPI<any>(`/api/purchase-intents/${id}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy: 'merchant_admin' }) }),
-  denyPurchase: (id: string) =>
-    fetchAdminAPI<any>(`/api/purchase-intents/${id}/deny`, { method: 'POST', body: JSON.stringify({ deniedBy: 'merchant_admin' }) }),
-  
-  // Transactions
-  getTransactions: () => fetchAPI<any>('/api/transactions'),
-  getTransactionReplay: (id: string) => fetchAPI<any>(`/api/transactions/${id}/replay`),
-  
-  // Audit
-  getAuditEvents: () => fetchAPI<any>('/api/audit-events'),
-  verifyAuditChain: () => fetchAPI<any>('/api/audit/verify'),
-  
-  // Policies (admin)
-  getPolicies: () => fetchAPI<any>('/api/policies'),
-  updatePolicy: (id: string, data: any) =>
-    fetchAdminAPI<any>(`/api/policies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  
-  // Approvals
-  getPendingApprovals: () => fetchAPI<any>('/api/approvals/pending'),
-  
-  // Agents
-  getAgents: () => fetchAPI<any>('/api/agents'),
+  login: (email: string, password: string) =>
+    request<{ token: string; user: SessionUser }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  logout: () => request<unknown>('/api/auth/logout', { method: 'POST' }),
+  me: () => request<SessionUser>('/api/auth/me'),
 
-  // Security & Zero-Trust
-  getSecurityOverview: () => fetchAPI<any>('/api/security/overview'),
-  getSecurityAgents: () => fetchAPI<any>('/api/security/agents'),
-  getSecurityIncidents: () => fetchAPI<any>('/api/security/incidents'),
-  unquarantineAgent: (id: string) => 
-    fetchAdminAPI<any>(`/api/security/agents/${id}/unquarantine`, { method: 'POST', body: '{}' }),
-  blockAgentPermanent: (id: string, reason?: string) => 
-    fetchAdminAPI<any>(`/api/security/agents/${id}/block-permanent`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  stats: () => request<Stats>('/api/dashboard/stats'),
+  transactions: () => request<TransactionRow[]>('/api/transactions'),
+  timeline: (id: string) => request<Timeline>(`/api/transactions/${id}/timeline`),
 
-  // Demo — Hackathon live demonstration endpoints
-  simulateAttack: (agentId?: string) =>
-    fetchAPI<any>('/api/demo/simulate-attack', { method: 'POST', body: JSON.stringify({ agentId: agentId || 'agent_shopping_01' }) }),
-  resetDemo: (agentId?: string) =>
-    fetchAPI<any>('/api/demo/reset', { method: 'POST', body: JSON.stringify({ agentId: agentId || 'agent_shopping_01' }) }),
+  pendingApprovals: () => request<PendingApproval[]>('/api/approvals/pending'),
+  decideApproval: (id: string, token: string, approve: boolean) =>
+    request<{ decision: string; status: string }>(`/api/purchase-intents/${id}/approval`, {
+      method: 'POST',
+      body: JSON.stringify({ token, approve }),
+    }),
+
+  agents: () => request<AgentRow[]>('/api/agents'),
+  unquarantine: (id: string) =>
+    request<unknown>(`/api/agents/${id}/unquarantine`, { method: 'POST', body: '{}' }),
+
+  policy: () => request<Policy>('/api/policies'),
+  updatePolicy: (patch: Partial<Policy>) =>
+    request<Policy>('/api/policies', { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  auditEvents: () => request<AuditRow[]>('/api/audit/events?limit=100'),
+  verifyAudit: () =>
+    request<{ valid: boolean; totalEvents: number; reason?: string; breakReason?: string }>(
+      '/api/audit/verify',
+      { method: 'POST', body: '{}' }
+    ),
+
+  runDemo: () => request<DemoRun>('/api/demo/run', { method: 'POST', body: '{}' }),
+  resetDemo: () => request<unknown>('/api/demo/reset', { method: 'POST', body: '{}' }),
 };
+
+/** Formats integer minor units for display: 29900 -> "₹299.00". */
+export function formatMinor(minor: number): string {
+  const sign = minor < 0 ? '-' : '';
+  const abs = Math.abs(minor);
+  return `${sign}₹${Math.floor(abs / 100).toLocaleString('en-IN')}.${String(abs % 100).padStart(2, '0')}`;
+}

@@ -3,7 +3,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AgentBridge — The Authorization Layer for AI Commerce",
-  description: "Merchant AI Commerce Gateway with deterministic financial controls, policy-based authorization, and tamper-evident audit trail.",
+  description:
+    "Deterministic authorization, human approval and a tamper-evident audit trail for AI agents that spend money.",
 };
 
 export default function RootLayout({
@@ -13,12 +14,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <head>
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-          rel="stylesheet"
-        />
-      </head>
       <body className="antialiased">{children}</body>
     </html>
   );

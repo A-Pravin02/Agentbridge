@@ -89,10 +89,18 @@ export async function buildServer(config: Config = getConfig()): Promise<Fastify
     global: true,
     max: config.RATE_LIMIT_MAX,
     timeWindow: config.RATE_LIMIT_WINDOW_MS,
-    // Rate-limit per agent key when present, else per IP, so one noisy agent
-    // cannot exhaust the budget of everyone behind the same NAT.
-    keyGenerator: (req) =>
-      (req.headers['x-agent-key-id'] as string) ?? req.ip ?? 'anonymous',
+    // Key on IP ONLY.
+    //
+    // Keying on X-Agent-Key-Id looks nicer — one noisy agent would not exhaust
+    // the budget of everyone behind the same NAT — but it is an attacker-
+    // controlled header, and this hook runs BEFORE authentication. An attacker
+    // that varies the header gets a fresh bucket per request and the limiter
+    // does nothing at all. (Verified: 15/15 requests passed a limit of 5.)
+    //
+    // Per-agent rate control is handled after authentication, by the velocity
+    // rule in the policy engine, where the identity is proven rather than
+    // asserted.
+    keyGenerator: (req) => req.ip ?? 'anonymous',
     // The plugin THROWS this object into the error handler, so it must carry a
     // statusCode or the handler cannot tell it apart from an internal fault.
     errorResponseBuilder: (_req, context) => ({
