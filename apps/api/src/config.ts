@@ -49,9 +49,9 @@ const schema = z.object({
   API_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
 
   /**
-   * Bind loopback locally so a dev machine does not expose the API to its
+   * Bind loopback on a dev machine so the API is not exposed to the local
    * network. A container must bind 0.0.0.0 or the platform's router cannot
-   * reach it — hence the production default below.
+   * reach it. See the resolution below for how that is decided.
    */
   API_HOST: z.string().optional(),
 
@@ -111,11 +111,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   // PORT (platform-injected) wins over API_PORT (ours) wins over the default.
   const { PORT, ...rest } = raw;
+
+  /**
+   * Decide the bind address from whether we are running on a PLATFORM, not from
+   * NODE_ENV.
+   *
+   * Keying this on `NODE_ENV === 'production'` was wrong and produced a 502 on
+   * Railway: a demo deployment legitimately runs with NODE_ENV=development (to
+   * enable the sandbox payment provider and the demo routes), and that flipped
+   * the bind address to loopback inside the container, where the platform's
+   * router cannot reach it.
+   *
+   * An injected PORT is the honest signal that something else owns the network
+   * and expects us to be reachable. That is true on Railway, Render, Fly and
+   * Heroku alike, and it is independent of NODE_ENV.
+   */
+  const onPlatform = PORT !== undefined || raw.NODE_ENV === 'production';
+
   const config: Config = {
     ...rest,
     API_PORT: PORT ?? raw.API_PORT,
-    // Containers must bind 0.0.0.0; local dev stays on loopback.
-    API_HOST: raw.API_HOST ?? (raw.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'),
+    API_HOST: raw.API_HOST ?? (onPlatform ? '0.0.0.0' : '127.0.0.1'),
   };
 
   if (config.NODE_ENV === 'production' && config.ENABLE_DEMO_ROUTES) {
