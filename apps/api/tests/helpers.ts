@@ -15,7 +15,25 @@ const TEST_DB = join(API_ROOT, 'prisma', 'test.db');
 
 // Set before anything imports config or the Prisma client.
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_URL = `file:${TEST_DB.replace(/\\/g, '/')}`;
+
+/**
+ * The suite runs against whichever engine DATABASE_URL names.
+ *
+ * An externally supplied Postgres URL is honoured, so the same invariants can be
+ * verified on the engine that will actually be deployed:
+ *
+ *   npm run db:use:postgres
+ *   $env:DATABASE_URL = "postgresql://..."   # PowerShell
+ *   npm test
+ *
+ * With nothing set, it falls back to a local SQLite file — the zero-setup path.
+ * Overwriting the variable unconditionally (as this once did) silently ignored
+ * the caller's database and made the Postgres run impossible.
+ */
+const EXTERNAL_DB = process.env.DATABASE_URL?.trim();
+export const IS_POSTGRES = /^postgres(ql)?:\/\//i.test(EXTERNAL_DB ?? '');
+process.env.DATABASE_URL = EXTERNAL_DB || `file:${TEST_DB.replace(/\\/g, '/')}`;
+
 process.env.PAYMENT_MODE = 'sandbox';
 process.env.RAZORPAY_KEY_ID = 'rzp_test_suite';
 process.env.RAZORPAY_KEY_SECRET = 'test_secret_at_least_32_characters_long!';
@@ -42,18 +60,34 @@ export interface TestWorld {
   ownerId: string;
 }
 
-/** Creates a fresh database from the migrations. */
+/** Creates a fresh database from the migrations, on whichever engine is in use. */
 export function resetDatabase(): void {
+  // The Prisma CLI reads apps/api/.env, which pins the local SQLite URL. Passing
+  // DATABASE_URL explicitly is not enough on its own — dotenv will not override
+  // an existing variable, but the CLI is invoked as a separate process, so the
+  // value has to travel with it.
+  const env = { ...process.env, DATABASE_URL: process.env.DATABASE_URL };
+  const run = (args: string[]) =>
+    execFileSync('npx', ['prisma', ...args], {
+      cwd: API_ROOT,
+      env,
+      stdio: 'pipe',
+      shell: process.platform === 'win32',
+    });
+
+  if (IS_POSTGRES) {
+    // No file to delete — drop and re-apply the schema instead. `migrate reset`
+    // is destructive by design and is why the suite must never be pointed at a
+    // database that holds anything worth keeping.
+    run(['migrate', 'reset', '--force', '--skip-seed', '--skip-generate']);
+    return;
+  }
+
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
     const f = `${TEST_DB}${suffix}`;
     if (existsSync(f)) rmSync(f, { force: true });
   }
-  execFileSync('npx', ['prisma', 'migrate', 'deploy'], {
-    cwd: API_ROOT,
-    env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL },
-    stdio: 'pipe',
-    shell: process.platform === 'win32',
-  });
+  run(['migrate', 'deploy']);
 }
 
 /** Seeds a merchant, policy, owner and agent, and returns a driveable world. */
