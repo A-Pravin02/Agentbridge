@@ -237,8 +237,26 @@ Read [docs/architecture.md](docs/architecture.md) for the full picture, and
 **On SQLite.** The default is SQLite so that `npm run setup` works with no external
 services. Every concurrency control is written to be engine-agnostic — the budget
 ledger uses an atomic conditional `UPDATE` rather than `SELECT … FOR UPDATE`, which is
-correct on both engines and needs no special isolation level. PostgreSQL is a
-supported first-class target; see [docs/deployment.md](docs/deployment.md).
+correct on both engines and needs no special isolation level.
+
+PostgreSQL is a first-class target: `npm run db:use:postgres` swaps the schema and
+migrations, and the Postgres migration carries the same 18 `CHECK` constraints. See
+[docs/deployment.md](docs/deployment.md).
+
+## Deploying
+
+The API is a long-running Fastify process; the dashboard is a static Next.js app. They
+want different hosts:
+
+```
+Browser → Vercel (dashboard) → Railway (API) → PostgreSQL
+```
+
+A root `Dockerfile` and `railway.json` deploy the API; `apps/web/vercel.json` deploys
+the dashboard. The API **cannot** run on Vercel — serverless has an ephemeral
+filesystem (SQLite dies), no persistent process (`app.listen` never starts), and no
+long-lived timer (approval expiry never runs). Full walkthrough in
+[docs/deployment.md](docs/deployment.md).
 
 **On payments.** With `PAYMENT_MODE=sandbox` the *counterparty* is simulated, not the
 *verification*. Signature checking is the same `verifyPaymentSignature` in both modes:

@@ -38,8 +38,23 @@ function requiredSecret(name: string) {
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+
+  /**
+   * Managed platforms (Railway, Render, Fly, Heroku) inject the port to bind as
+   * `PORT` and expect the process to use it. Honour that first, then our own
+   * `API_PORT`, then the local default — so the same build runs unchanged
+   * locally and on a platform.
+   */
+  PORT: z.coerce.number().int().min(1).max(65535).optional(),
   API_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
-  API_HOST: z.string().default('127.0.0.1'),
+
+  /**
+   * Bind loopback locally so a dev machine does not expose the API to its
+   * network. A container must bind 0.0.0.0 or the platform's router cannot
+   * reach it — hence the production default below.
+   */
+  API_HOST: z.string().optional(),
+
   DATABASE_URL: z.string().min(1).default('file:./dev.db'),
 
   /** Comma-separated browser origins permitted to call the API. */
@@ -76,7 +91,13 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 });
 
-export type Config = z.infer<typeof schema>;
+type RawConfig = z.infer<typeof schema>;
+
+/** Config as the application consumes it: port and host already resolved. */
+export type Config = Omit<RawConfig, 'PORT'> & {
+  API_PORT: number;
+  API_HOST: string;
+};
 
 let cached: Config | null = null;
 
@@ -86,7 +107,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const detail = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Invalid environment configuration:\n${detail}`);
   }
-  const config = parsed.data;
+  const raw = parsed.data;
+
+  // PORT (platform-injected) wins over API_PORT (ours) wins over the default.
+  const { PORT, ...rest } = raw;
+  const config: Config = {
+    ...rest,
+    API_PORT: PORT ?? raw.API_PORT,
+    // Containers must bind 0.0.0.0; local dev stays on loopback.
+    API_HOST: raw.API_HOST ?? (raw.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'),
+  };
 
   if (config.NODE_ENV === 'production' && config.ENABLE_DEMO_ROUTES) {
     throw new Error('ENABLE_DEMO_ROUTES must be false in production');

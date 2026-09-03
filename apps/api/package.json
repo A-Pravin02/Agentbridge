@@ -4,12 +4,16 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "build": "prisma generate && tsc",
+    "start": "node dist/src/index.js",
     "clean": "rimraf dist",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
-    "db:reset": "prisma migrate reset --force"
+    "db:reset": "prisma migrate reset --force",
+    "db:use:sqlite": "node scripts/use-database.mjs sqlite",
+    "db:use:postgres": "node scripts/use-database.mjs postgres",
+    "db:generate": "prisma generate",
+    "start:migrate": "prisma migrate deploy && node dist/src/index.js"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

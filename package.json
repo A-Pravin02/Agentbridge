@@ -9,20 +9,24 @@
   ],
   "scripts": {
     "setup": "npm install && npm run db:setup && npm run seed",
-    "db:setup": "npm run db:migrate --workspace=@agentbridge/api",
+    "db:setup": "npm run db:use:sqlite --workspace=@agentbridge/api && npm run db:generate --workspace=@agentbridge/api && npm run db:migrate --workspace=@agentbridge/api",
     "seed": "npm run db:seed --workspace=@agentbridge/api",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "npm run dev --workspace=@agentbridge/api",
     "dev:web": "npm run dev --workspace=web",
     "mcp": "npm run dev --workspace=@agentbridge/mcp",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build:packages && npm run build --workspace=@agentbridge/api && npm run build --workspace=@agentbridge/mcp",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit -p apps/api/tsconfig.json && tsc --noEmit -p apps/mcp/tsconfig.json && tsc --noEmit -p apps/web/tsconfig.json",
+    "typecheck": "npm run build:packages && tsc --noEmit -p apps/api/tsconfig.json && tsc --noEmit -p apps/mcp/tsconfig.json && tsc --noEmit -p apps/web/tsconfig.json",
     "lint": "npm run lint --workspace=web",
     "verify": "npm run typecheck && npm run test",
-    "clean": "npm run clean --workspaces --if-present"
+    "clean": "npm run clean --workspaces --if-present",
+    "db:use:sqlite": "npm run db:use:sqlite --workspace=@agentbridge/api",
+    "db:use:postgres": "npm run db:use:postgres --workspace=@agentbridge/api",
+    "build:packages": "npm run build --workspace=@agentbridge/shared-types && npm run build --workspace=@agentbridge/policy-engine && npm run build --workspace=@agentbridge/threat-analyzer && npm run build --workspace=@agentbridge/audit && npm run build --workspace=@agentbridge/payments",
+    "build:web": "npm run build --workspace=web"
   },
   "engines": {
     "node": ">=18.0.0"
