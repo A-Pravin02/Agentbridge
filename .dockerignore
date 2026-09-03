@@ -14,6 +14,10 @@ graphify-out
 .env.*
 !.env.example
 apps/api/.demo-agent.json
-apps/web
+# The API image does not need the dashboard's source — but `npm ci` resolves the
+# whole workspace from the lockfile, so its package.json must be present or the
+# install fails. Exclude the contents, keep the manifest.
+apps/web/**
+!apps/web/package.json
 docs
 *.md

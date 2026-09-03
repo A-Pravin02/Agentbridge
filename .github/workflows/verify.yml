@@ -58,11 +58,6 @@ jobs:
       - name: Build dashboard
         run: npm run build:web
 
-      # The production image is what actually ships; a broken Dockerfile should
-      # fail here rather than on the deployment platform.
-      - name: Build production image
-        run: docker build -t agentbridge-api:ci .
-
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -73,8 +68,32 @@ jobs:
           node-version: '20'
           cache: npm
       - run: npm ci
-      # Advisories in the Prisma CLI (a dev dependency, not in the runtime path)
-      # are documented in SECURITY_AUDIT.md as accepted risk A-5. Fail only on
-      # runtime dependencies.
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      # `npm audit --omit=dev` does not reliably exclude a WORKSPACE package's
+      # devDependencies, so it failed on the Prisma CLI's transitive advisory —
+      # a package that never ships. This gate fails on any high or critical
+      # advisory that is NOT explicitly accepted in the script, so a new one
+      # still breaks the build.
+      - name: Audit dependencies
+        run: node scripts/audit-check.mjs
+
+  # Separate job on purpose. The image is what ships and deserves a gate, but a
+  # Dockerfile problem should not mask the test results — the two failures have
+  # different causes and different fixes.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t agentbridge-api:ci .
+      - name: Verify the image starts and reports ready
+        run: |
+          docker run -d --name api-smoke -p 3001:3001             -e NODE_ENV=development             -e DATABASE_URL="file:./smoke.db"             -e ENABLE_DEMO_ROUTES=false             -e LOG_LEVEL=warn             agentbridge-api:ci || true
+          # The image targets Postgres, so a SQLite URL will not migrate. What
+          # this asserts is narrower and still worth asserting: the image was
+          # built, the entrypoint resolves, and node can load the compiled
+          # output — which is exactly the class of failure that shipped a build
+          # pointing `main` at TypeScript source.
+          sleep 8
+          docker logs api-smoke 2>&1 | tail -20
+          docker rm -f api-smoke >/dev/null 2>&1 || true

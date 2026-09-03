@@ -303,6 +303,13 @@ CLI, a dev dependency. Not in the runtime path. Fixed only in a Prisma 8 release
 candidate; shipping an RC of the ORM to resolve a dev-only advisory is the worse
 trade. Re-evaluate when Prisma 8 is stable.
 
+Enforced rather than merely asserted: `scripts/audit-check.mjs` fails CI on any high or
+critical advisory that is **not** on an explicit accepted list. This one is listed with
+its reason; anything new breaks the build. The blunter `npm audit --omit=dev` was tried
+first and does not work here — it fails to exclude a *workspace* package's
+devDependencies, so it flagged this advisory and failed the build on a package that
+never ships.
+
 ---
 
 ## Design decisions worth defending

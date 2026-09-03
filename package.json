@@ -26,7 +26,8 @@
     "db:use:sqlite": "npm run db:use:sqlite --workspace=@agentbridge/api",
     "db:use:postgres": "npm run db:use:postgres --workspace=@agentbridge/api",
     "build:packages": "npm run build --workspace=@agentbridge/shared-types && npm run build --workspace=@agentbridge/policy-engine && npm run build --workspace=@agentbridge/threat-analyzer && npm run build --workspace=@agentbridge/audit && npm run build --workspace=@agentbridge/payments",
-    "build:web": "npm run build --workspace=web"
+    "build:web": "npm run build --workspace=web",
+    "audit": "node scripts/audit-check.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
