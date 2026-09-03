@@ -16,7 +16,7 @@ export function checkDeniedApprovals(ctx: ThreatContext): ThreatFactor | null {
       rule: ThreatRule.REPEATED_DENIED_APPROVALS,
       points: 20,
       message: `Agent has had ${ctx.deniedCountLast30Min} transactions denied by human reviewers in the last 30 minutes`,
-      metadata: {
+      detail: {
         count: ctx.deniedCountLast30Min,
         windowMinutes: 30,
         threshold: MIN_DENIED_COUNT,

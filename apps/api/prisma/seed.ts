@@ -1,157 +1,184 @@
 // ============================================
 // AgentBridge - Database Seed
-// Creates TechKart demo merchant, products, policy, and agent
 // ============================================
+// Creates the TechKart demo merchant, its policy, catalogue, an approver
+// account, and one agent with a freshly generated Ed25519 key pair.
+//
+// The agent's PRIVATE key is written to apps/api/.demo-agent.json (git-ignored)
+// and is never stored in the database — the server keeps only the public key.
 
 import { PrismaClient } from '@prisma/client';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
+import { generateAgentKeyPair, hashPassword } from '../src/lib/crypto.js';
+import { toMinor, formatMinor } from '@agentbridge/shared-types';
 
 const prisma = new PrismaClient();
 
-async function main() {
-  console.log('🌱 Seeding AgentBridge database...\n');
+const DEMO_PASSWORD = process.env.DEMO_APPROVER_PASSWORD ?? 'techkart-demo-2026';
 
-  // ---- Create Merchant: TechKart ----
+async function main() {
+  console.log('\nSeeding AgentBridge\n');
+
   const merchant = await prisma.merchant.upsert({
     where: { id: 'techkart_01' },
     update: {},
+    create: { id: 'techkart_01', name: 'TechKart', status: 'ACTIVE' },
+  });
+  console.log(`  merchant   ${merchant.name}`);
+
+  // ---- Approver account ----
+  const approver = await prisma.merchantUser.upsert({
+    where: { email: 'owner@techkart.demo' },
+    update: {},
     create: {
-      id: 'techkart_01',
-      name: 'TechKart',
-      status: 'ACTIVE',
+      merchantId: merchant.id,
+      email: 'owner@techkart.demo',
+      passwordHash: await hashPassword(DEMO_PASSWORD),
+      role: 'OWNER',
     },
   });
-  console.log(`✅ Merchant: ${merchant.name} (${merchant.id})`);
+  console.log(`  user       ${approver.email} (OWNER)`);
 
-  // ---- Create Products ----
+  // ---- Catalogue. Prices in paise. ----
   const products = [
-    {
-      id: 'prod_usb_cable',
-      merchantId: merchant.id,
-      name: 'USB-C Cable',
-      description: 'High-quality braided USB-C charging cable, 1.5m length',
-      price: 299,
-      currency: 'INR',
-      category: 'Electronics Accessories',
-      stock: 20,
-    },
-    {
-      id: 'prod_phone_case',
-      merchantId: merchant.id,
-      name: 'Premium Phone Case',
-      description: 'Shockproof premium phone case with matte finish',
-      price: 399,
-      currency: 'INR',
-      category: 'Phone Accessories',
-      stock: 12,
-    },
-    {
-      id: 'prod_premium_case',
-      merchantId: merchant.id,
-      name: 'Premium Case',
-      description: 'Ultra-slim premium protective case with wireless charging support',
-      price: 499,
-      currency: 'INR',
-      category: 'Phone Accessories',
-      stock: 8,
-    },
-    {
-      id: 'prod_power_bank',
-      merchantId: merchant.id,
-      name: 'Power Bank',
-      description: '10000mAh fast charging power bank with dual USB ports',
-      price: 1499,
-      currency: 'INR',
-      category: 'Electronics',
-      stock: 5,
-    },
-    {
-      id: 'prod_bt_speaker',
-      merchantId: merchant.id,
-      name: 'Bluetooth Speaker',
-      description: 'Portable wireless Bluetooth speaker with 12hr battery life',
-      price: 2999,
-      currency: 'INR',
-      category: 'Electronics',
-      stock: 4,
-    },
-  ];
+    ['prod_usb_cable', 'USB-C Cable', 'Braided 1.5m USB-C charging cable', 299, 'Electronics Accessories', 20],
+    ['prod_phone_case', 'Premium Phone Case', 'Shockproof case, matte finish', 399, 'Phone Accessories', 12],
+    ['prod_premium_case', 'Premium Case', 'Ultra-slim case with wireless charging support', 499, 'Phone Accessories', 8],
+    ['prod_power_bank', 'Power Bank', '10000mAh fast-charging power bank', 1499, 'Electronics', 5],
+    ['prod_bt_speaker', 'Bluetooth Speaker', 'Portable speaker, 12h battery', 2999, 'Electronics', 4],
+    // Priced UNDER every limit on purpose: the only reason it is refused is the
+    // category rule, which isolates that rule in the demo.
+    ['prod_designer_watch', 'Designer Watch', 'Luxury analogue watch', 450, 'Luxury', 3],
+  ] as const;
 
-  for (const product of products) {
+  for (const [id, name, description, rupees, category, stock] of products) {
     const p = await prisma.product.upsert({
-      where: { id: product.id },
-      update: { stock: product.stock, price: product.price },
-      create: product,
+      where: { id },
+      update: { priceMinor: toMinor(rupees), stock, active: true },
+      create: {
+        id,
+        merchantId: merchant.id,
+        name,
+        description,
+        priceMinor: toMinor(rupees),
+        currency: 'INR',
+        category,
+        stock,
+      },
     });
-    console.log(`  📦 Product: ${p.name} — ₹${p.price} (${p.category}) [Stock: ${p.stock}]`);
+    console.log(`  product    ${p.name.padEnd(20)} ${formatMinor(p.priceMinor).padStart(10)}  ${p.category}`);
   }
 
-  // ---- Create Policy (arrays stored as JSON strings for SQLite) ----
-  const allowedCategories = JSON.stringify(['Phone Accessories', 'Electronics Accessories']);
+  // ---- Merchant policy ----
+  const policyFields = {
+    maxTransactionMinor: toMinor(500),
+    maxDailyMinor: toMinor(2000),
+    maxTransactionsPerDay: 5,
+    allowedCategories: JSON.stringify([
+      'Phone Accessories',
+      'Electronics Accessories',
+      'Electronics',
+    ]),
+    allowedCurrencies: JSON.stringify(['INR']),
+    approvalThresholdMinor: toMinor(400),
+    riskBlockThreshold: 80,
+    riskApprovalThreshold: 60,
+  };
 
   const policy = await prisma.policy.upsert({
-    where: { id: 'policy_techkart_01' },
-    update: {},
+    where: { merchantId: merchant.id },
+    update: policyFields,
     create: {
-      id: 'policy_techkart_01',
       merchantId: merchant.id,
-      maxTransactionAmount: 500,
-      maxDailyAmount: 2000,
-      maxTransactionsPerDay: 5,
-      allowedCategories: allowedCategories,
-      approvalThreshold: 400,
+      version: 1,
+      ...policyFields,
     },
   });
-  console.log(`\n✅ Policy: Max ₹${policy.maxTransactionAmount}/txn, ₹${policy.maxDailyAmount}/day, Approval > ₹${policy.approvalThreshold}`);
+  console.log(
+    `\n  policy     max ${formatMinor(policy.maxTransactionMinor)}/txn, ` +
+      `${formatMinor(policy.maxDailyMinor)}/day, ${policy.maxTransactionsPerDay} txn/day, ` +
+      `approval above ${formatMinor(policy.approvalThresholdMinor)}`
+  );
 
-  // ---- Create Agent ----
+  // ---- Agent + key pair ----
+  const keys = generateAgentKeyPair();
   const agent = await prisma.agent.upsert({
     where: { id: 'agent_shopping_01' },
-    update: {},
+    update: { keyId: keys.keyId, publicKey: keys.publicKey, status: 'ACTIVE' },
     create: {
       id: 'agent_shopping_01',
       merchantId: merchant.id,
       name: 'Shopping Assistant',
       status: 'ACTIVE',
+      keyId: keys.keyId,
+      publicKey: keys.publicKey,
     },
   });
-  console.log(`\n✅ Agent: ${agent.name} (${agent.id})`);
 
-  // ---- Create Agent Permission (Passport) ----
-  const agentCategories = JSON.stringify(['Phone Accessories', 'Electronics Accessories']);
+  const passportFields = {
+    canSearch: true,
+    canCreatePurchaseIntent: true,
+    canExecutePurchase: true,
+    allowedCategories: JSON.stringify([
+      'Phone Accessories',
+      'Electronics Accessories',
+      'Electronics',
+    ]),
+    allowedMerchantIds: JSON.stringify([merchant.id]),
+    allowedCurrencies: JSON.stringify(['INR']),
+    maxTransactionMinor: toMinor(500),
+    maxDailyMinor: toMinor(2000),
+    maxTransactionsPerDay: 5,
+    maxPerMinute: 30,
+    allowedHoursUtc: null,
+  };
 
-  const permission = await prisma.agentPermission.upsert({
-    where: { id: 'perm_shopping_01' },
-    update: {},
+  await prisma.agentPermission.upsert({
+    where: { agentId: agent.id },
+    update: passportFields,
     create: {
-      id: 'perm_shopping_01',
       agentId: agent.id,
-      canSearch: true,
-      canCreatePurchaseIntent: true,
-      canExecutePurchase: true,
-      allowedCategories: agentCategories,
-      maxTransactionAmount: 500,
-      maxDailyAmount: 2000,
-      expiresAt: null,
+      ...passportFields,
     },
   });
-  console.log(`  🪪 Permission Passport: search=${permission.canSearch}, purchase=${permission.canExecutePurchase}`);
-  console.log(`  💰 Limits: ₹${permission.maxTransactionAmount}/txn, ₹${permission.maxDailyAmount}/day`);
-  console.log(`  📂 Categories: ${permission.allowedCategories}`);
+  console.log(`  agent      ${agent.name} (${agent.keyId})`);
 
-  console.log('\n✅ Seed complete!\n');
-  console.log('Expected Demo Results:');
-  console.log('  ₹299 USB-C Cable        → ALLOW');
-  console.log('  ₹399 Premium Phone Case  → ALLOW');
-  console.log('  ₹499 Premium Case        → REQUIRE_APPROVAL (above ₹400 threshold)');
-  console.log('  ₹1499 Power Bank         → BLOCK (exceeds ₹500 limit)');
-  console.log('  ₹2999 Bluetooth Speaker  → BLOCK (exceeds ₹500 limit)');
+  // Private key to disk, never to the database.
+  const identityPath = join(process.cwd(), '.demo-agent.json');
+  writeFileSync(
+    identityPath,
+    JSON.stringify(
+      { agentId: agent.id, keyId: keys.keyId, privateKey: keys.privateKey, publicKey: keys.publicKey },
+      null,
+      2
+    )
+  );
+  console.log(`  keypair    private key -> apps/api/.demo-agent.json (git-ignored)`);
+
+  await prisma.auditChainHead.upsert({
+    where: { id: 'singleton' },
+    update: {},
+    create: { id: 'singleton', sequence: -1, hash: 'GENESIS' },
+  });
+
+  console.log(`
+Expected demo outcomes
+  ${formatMinor(toMinor(299)).padStart(10)}  USB-C Cable          ALLOW
+  ${formatMinor(toMinor(399)).padStart(10)}  Premium Phone Case   ALLOW
+  ${formatMinor(toMinor(499)).padStart(10)}  Premium Case         REQUIRE_APPROVAL  (above the ${formatMinor(toMinor(400))} threshold)
+  ${formatMinor(toMinor(1499)).padStart(10)}  Power Bank           BLOCK             (above the ${formatMinor(toMinor(500))} per-transaction cap)
+  ${formatMinor(toMinor(2999)).padStart(10)}  Bluetooth Speaker    BLOCK             (far above the per-transaction cap)
+  ${formatMinor(toMinor(450)).padStart(10)}  Designer Watch       BLOCK             (category "Luxury" is not permitted)
+
+Merchant dashboard login
+  owner@techkart.demo / ${DEMO_PASSWORD}
+`);
 }
 
 main()
   .catch((e) => {
-    console.error('❌ Seed failed:', e);
+    console.error('Seed failed:', e);
     process.exit(1);
   })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+  .finally(() => prisma.$disconnect());

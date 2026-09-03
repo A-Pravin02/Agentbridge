@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": ".",
+    "noUnusedLocals": true,
+    "noUnusedParameters": false,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": false
   },
-  "include": ["src"]
+  "include": ["src/**/*", "prisma/seed.ts"]
 }

@@ -1,50 +1,46 @@
 // ============================================
 // AgentBridge - Purchase State Machine
-// Enforces valid transaction lifecycle transitions
 // ============================================
+// Every state change in the system goes through `assertTransition`, inside the
+// same database transaction that performs the write. The audit found that the
+// previous implementation imported these helpers but guarded only one edge;
+// the API now has no raw status writes at all.
 
 import { PurchaseStatus, VALID_TRANSITIONS } from '@agentbridge/shared-types';
 
 export class InvalidTransitionError extends Error {
-  constructor(
-    public readonly from: PurchaseStatus,
-    public readonly to: PurchaseStatus
-  ) {
+  readonly from: PurchaseStatus;
+  readonly to: PurchaseStatus;
+
+  constructor(from: PurchaseStatus, to: PurchaseStatus) {
     super(`Invalid state transition: ${from} → ${to}`);
     this.name = 'InvalidTransitionError';
+    this.from = from;
+    this.to = to;
   }
 }
 
-/**
- * Validates whether a state transition is allowed.
- * Returns true if the transition is valid, false otherwise.
- */
 export function canTransition(from: PurchaseStatus, to: PurchaseStatus): boolean {
   const allowed = VALID_TRANSITIONS[from];
-  return allowed.includes(to);
+  return allowed !== undefined && allowed.includes(to);
 }
 
-/**
- * Attempts a state transition. Throws InvalidTransitionError if invalid.
- * Returns the new state if valid.
- */
-export function transition(from: PurchaseStatus, to: PurchaseStatus): PurchaseStatus {
+/** Throws unless the transition is permitted. Use at every write site. */
+export function assertTransition(from: PurchaseStatus, to: PurchaseStatus): void {
   if (!canTransition(from, to)) {
     throw new InvalidTransitionError(from, to);
   }
+}
+
+export function transition(from: PurchaseStatus, to: PurchaseStatus): PurchaseStatus {
+  assertTransition(from, to);
   return to;
 }
 
-/**
- * Returns all states reachable from the given state.
- */
 export function getNextStates(from: PurchaseStatus): PurchaseStatus[] {
-  return VALID_TRANSITIONS[from];
+  return VALID_TRANSITIONS[from] ?? [];
 }
 
-/**
- * Returns true if the state is a terminal state (no further transitions possible).
- */
 export function isTerminalState(status: PurchaseStatus): boolean {
-  return VALID_TRANSITIONS[status].length === 0;
+  return (VALID_TRANSITIONS[status] ?? []).length === 0;
 }

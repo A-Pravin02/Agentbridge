@@ -1,4 +1,4 @@
-import { ThreatContext, ThreatFactor, ThreatRule } from '@agentbridge/shared-types';
+import { ThreatContext, ThreatFactor, ThreatRule, formatMinor } from '@agentbridge/shared-types';
 
 /**
  * RULE 8: RAPID_ESCALATION
@@ -22,7 +22,7 @@ export function checkRapidEscalation(ctx: ThreatContext): ThreatFactor | null {
 
   // Sort by time ascending — most recent last
   const sorted = [...intents].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-  const amounts = sorted.map(i => i.amount);
+  const amounts = sorted.map(i => i.amountMinor);
 
   // Check strictly increasing
   let isIncreasing = true;
@@ -39,14 +39,14 @@ export function checkRapidEscalation(ctx: ThreatContext): ThreatFactor | null {
   const lastAmount = amounts[amounts.length - 1];
   const ratio = firstAmount > 0 ? lastAmount / firstAmount : 0;
 
-  if (ratio >= MIN_ESCALATION_RATIO && ctx.currentAmount >= lastAmount) {
+  if (ratio >= MIN_ESCALATION_RATIO && ctx.currentAmountMinor >= lastAmount) {
     return {
       rule: ThreatRule.RAPID_ESCALATION,
       points: 15,
-      message: `Agent transaction amounts are rapidly escalating: ${amounts.map(a => `₹${a}`).join(' → ')} → ₹${ctx.currentAmount} (${ratio.toFixed(1)}x increase)`,
-      metadata: {
+      message: `Agent transaction amounts are escalating: ${amounts.map((a) => formatMinor(a)).join(' -> ')} -> ${formatMinor(ctx.currentAmountMinor)} (${ratio.toFixed(1)}x increase)`,
+      detail: {
         amounts,
-        currentAmount: ctx.currentAmount,
+        currentAmountMinor: ctx.currentAmountMinor,
         escalationRatio: +ratio.toFixed(2),
         windowMinutes: 10,
       },

@@ -12,7 +12,7 @@ export function checkBlockedAttempts(ctx: ThreatContext): ThreatFactor | null {
       rule: ThreatRule.EXCESSIVE_BLOCKED_ATTEMPTS,
       points: 60,
       message: `Agent has ${ctx.blockedCountLast30Min} blocked transaction attempts in the last 30 minutes — severe malicious behavior signal`,
-      metadata: { count: ctx.blockedCountLast30Min, windowMinutes: 30, threshold: 6 },
+      detail: { count: ctx.blockedCountLast30Min, windowMinutes: 30, threshold: 6 },
     };
   }
 
@@ -21,7 +21,7 @@ export function checkBlockedAttempts(ctx: ThreatContext): ThreatFactor | null {
       rule: ThreatRule.REPEATED_BLOCKED_ATTEMPTS,
       points: 30,
       message: `Agent has ${ctx.blockedCountLast10Min} blocked transaction attempts in the last 10 minutes`,
-      metadata: { count: ctx.blockedCountLast10Min, windowMinutes: 10, threshold: 3 },
+      detail: { count: ctx.blockedCountLast10Min, windowMinutes: 10, threshold: 3 },
     };
   }
 

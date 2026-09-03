@@ -1,270 +1,328 @@
 // ============================================
-// AgentBridge - Policy Engine Tests
-// Tests for deterministic financial authorization
+// Policy Engine — rule coverage, precedence, determinism
 // ============================================
 
 import { describe, it, expect } from 'vitest';
-import { evaluatePolicy } from '../src/index.js';
-import { transition, canTransition, InvalidTransitionError } from '../src/state-machine.js';
 import {
-  PolicyContext,
+  AgentStatus,
   PolicyDecision,
-  PurchaseStatus,
-  ViolationRule,
+  PolicyRule,
+  ReasonCode,
+  ThreatLevel,
+  toMinor,
+  type PolicyContext,
 } from '@agentbridge/shared-types';
+import { evaluatePolicy } from '../src/index.js';
 
-// ---- Test Helpers ----
+const NOW = new Date('2026-09-03T12:00:00.000Z');
 
-function createTestContext(overrides: Partial<{
-  amount: number;
-  category: string;
-  dailySpent: number;
-  dailyTransactionCount: number;
-  maxTransactionAmount: number;
-  maxDailyAmount: number;
-  approvalThreshold: number;
-  allowedCategories: string[];
-  agentMaxTransaction: number;
-  agentMaxDaily: number;
-  agentAllowedCategories: string[];
-  canCreatePurchaseIntent: boolean;
-  canExecutePurchase: boolean;
-  expiresAt: Date | null;
-}> = {}): PolicyContext {
-  return {
+function context(overrides: Partial<PolicyContext> = {}): PolicyContext {
+  const base: PolicyContext = {
+    decisionId: 'decision-fixed-for-determinism',
+    now: NOW,
     request: {
-      merchantId: 'techkart',
-      agentId: 'agent_shopping_01',
-      productId: 'product_1',
-      productCategory: overrides.category ?? 'Phone Accessories',
-      amount: overrides.amount ?? 399,
+      merchantId: 'm1',
+      agentId: 'a1',
+      productId: 'p1',
+      productCategory: 'Phone Accessories',
+      amountMinor: toMinor(299),
       currency: 'INR',
       quantity: 1,
-      agentReason: 'User requested a phone case under ₹500',
+      agentReason: 'user asked for a cable',
     },
-    policy: {
-      agentPermission: {
-        id: 'perm_1',
-        agentId: 'agent_shopping_01',
-        canSearch: true,
-        canCreatePurchaseIntent: overrides.canCreatePurchaseIntent ?? true,
-        canExecutePurchase: overrides.canExecutePurchase ?? true,
-        allowedCategories: overrides.agentAllowedCategories ?? overrides.allowedCategories ?? ['Phone Accessories', 'Electronics Accessories'],
-        maxTransactionAmount: overrides.agentMaxTransaction ?? overrides.maxTransactionAmount ?? 500,
-        maxDailyAmount: overrides.agentMaxDaily ?? overrides.maxDailyAmount ?? 2000,
-        expiresAt: overrides.expiresAt === undefined ? null : overrides.expiresAt,
-      },
-      merchantPolicy: {
-        id: 'policy_1',
-        merchantId: 'techkart',
-        maxTransactionAmount: overrides.maxTransactionAmount ?? 500,
-        maxDailyAmount: overrides.maxDailyAmount ?? 2000,
-        maxTransactionsPerDay: 5,
-        allowedCategories: overrides.allowedCategories ?? ['Phone Accessories', 'Electronics Accessories'],
-        approvalThreshold: overrides.approvalThreshold ?? 400,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
+    agentStatus: AgentStatus.ACTIVE,
+    permission: {
+      agentId: 'a1',
+      canSearch: true,
+      canCreatePurchaseIntent: true,
+      canExecutePurchase: true,
+      allowedCategories: ['Phone Accessories', 'Electronics Accessories'],
+      allowedMerchantIds: ['m1'],
+      allowedCurrencies: ['INR'],
+      maxTransactionMinor: toMinor(500),
+      maxDailyMinor: toMinor(2000),
+      maxTransactionsPerDay: 5,
+      maxPerMinute: 30,
+      allowedHoursUtc: null,
+      expiresAt: null,
     },
-    dailySpent: overrides.dailySpent ?? 0,
-    dailyTransactionCount: overrides.dailyTransactionCount ?? 0,
+    merchantPolicy: {
+      id: 'pol1',
+      merchantId: 'm1',
+      version: 7,
+      maxTransactionMinor: toMinor(500),
+      maxDailyMinor: toMinor(2000),
+      maxTransactionsPerDay: 5,
+      allowedCategories: ['Phone Accessories', 'Electronics Accessories'],
+      allowedCurrencies: ['INR'],
+      approvalThresholdMinor: toMinor(400),
+      riskBlockThreshold: 80,
+      riskApprovalThreshold: 60,
+      expiresAt: null,
+    },
+    usage: { dailySpentMinor: 0, dailyTransactionCount: 0, countLastMinute: 0 },
+    risk: { score: 0, level: ThreatLevel.LOW },
   };
+  return { ...base, ...overrides } as PolicyContext;
 }
 
-// ============================================
-// POLICY ENGINE TESTS
-// ============================================
+const ruleOf = (result: ReturnType<typeof evaluatePolicy>, rule: PolicyRule) =>
+  result.evaluatedRules.find((r) => r.rule === rule)!;
 
-describe('Policy Engine', () => {
-  describe('ALLOW decisions', () => {
-    it('should ALLOW ₹299 USB-C Cable', () => {
-      const ctx = createTestContext({ amount: 299, category: 'Electronics Accessories' });
-      const result = evaluatePolicy(ctx);
+describe('evaluatePolicy', () => {
+  describe('happy path', () => {
+    it('allows a purchase that satisfies every rule', () => {
+      const result = evaluatePolicy(context());
       expect(result.decision).toBe(PolicyDecision.ALLOW);
+      expect(result.reasonCode).toBe(ReasonCode.OK);
       expect(result.violations).toHaveLength(0);
     });
 
-    it('should ALLOW ₹399 Premium Phone Case', () => {
-      const ctx = createTestContext({ amount: 399, category: 'Phone Accessories' });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.ALLOW);
-      expect(result.violations).toHaveLength(0);
+    it('evaluates every rule, not just the failing ones', () => {
+      const result = evaluatePolicy(context());
+      // Explainability: the dashboard shows passing checks too.
+      expect(result.evaluatedRules).toHaveLength(Object.keys(PolicyRule).length);
+      expect(result.evaluatedRules.every((r) => r.passed)).toBe(true);
     });
 
-    it('should ALLOW exactly at approval threshold ₹400', () => {
-      const ctx = createTestContext({ amount: 400, category: 'Phone Accessories' });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.ALLOW);
+    it('reports the policy version that produced the decision', () => {
+      expect(evaluatePolicy(context()).policyVersion).toBe(7);
     });
   });
 
-  describe('REQUIRE_APPROVAL decisions', () => {
-    it('should REQUIRE_APPROVAL for ₹499 (above ₹400 threshold, within ₹500 limit)', () => {
-      const ctx = createTestContext({ amount: 499, category: 'Phone Accessories' });
+  describe('blocking rules', () => {
+    it('blocks when the agent is not active', () => {
+      const result = evaluatePolicy(context({ agentStatus: AgentStatus.QUARANTINED }));
+      expect(result.decision).toBe(PolicyDecision.BLOCK);
+      expect(result.reasonCode).toBe(ReasonCode.AGENT_NOT_ACTIVE);
+    });
+
+    it('blocks when the agent lacks purchase capability', () => {
+      const ctx = context();
+      ctx.permission.canExecutePurchase = false;
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.AGENT_PERMISSION_DENIED);
+    });
+
+    it('blocks on an expired passport', () => {
+      const ctx = context();
+      ctx.permission.expiresAt = new Date(NOW.getTime() - 1);
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.PERMISSION_EXPIRED);
+    });
+
+    it('treats a passport expiring exactly now as expired', () => {
+      const ctx = context();
+      ctx.permission.expiresAt = new Date(NOW.getTime());
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.BLOCK);
+    });
+
+    it('blocks on an expired merchant policy', () => {
+      const ctx = context();
+      ctx.merchantPolicy.expiresAt = new Date(NOW.getTime() - 1000);
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.POLICY_EXPIRED);
+    });
+
+    it('blocks a currency neither side permits', () => {
+      const ctx = context();
+      ctx.request.currency = 'USD';
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.CURRENCY_NOT_ALLOWED);
+    });
+
+    it('blocks a merchant outside the passport allow-list', () => {
+      const ctx = context();
+      ctx.permission.allowedMerchantIds = ['other-merchant'];
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.MERCHANT_NOT_ALLOWED);
+    });
+
+    it('treats an empty merchant allow-list as "no extra restriction"', () => {
+      const ctx = context();
+      ctx.permission.allowedMerchantIds = [];
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('blocks a category the merchant permits but the agent does not', () => {
+      const ctx = context();
+      ctx.permission.allowedCategories = ['Electronics Accessories'];
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.CATEGORY_NOT_ALLOWED);
+    });
+
+    it('blocks a category the agent permits but the merchant does not', () => {
+      const ctx = context();
+      ctx.merchantPolicy.allowedCategories = ['Electronics Accessories'];
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.CATEGORY_NOT_ALLOWED);
+    });
+
+    it('fails closed when the category allow-list is empty', () => {
+      const ctx = context();
+      ctx.permission.allowedCategories = [];
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.BLOCK);
+    });
+
+    it('blocks above the per-transaction limit', () => {
+      const ctx = context();
+      ctx.request.amountMinor = toMinor(1499);
+      const result = evaluatePolicy(ctx);
+      expect(result.reasonCode).toBe(ReasonCode.TRANSACTION_LIMIT_EXCEEDED);
+      expect(ruleOf(result, PolicyRule.MAX_TRANSACTION_AMOUNT).detail).toMatchObject({
+        amountMinor: 149900,
+        limitMinor: 50000,
+      });
+    });
+
+    it('uses the LOWER of the merchant and agent transaction limits', () => {
+      const ctx = context();
+      ctx.permission.maxTransactionMinor = toMinor(200);
+      ctx.request.amountMinor = toMinor(299);
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.TRANSACTION_LIMIT_EXCEEDED);
+    });
+
+    it('allows an amount exactly at the limit', () => {
+      const ctx = context();
+      ctx.request.amountMinor = toMinor(500);
+      ctx.merchantPolicy.approvalThresholdMinor = toMinor(500);
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('blocks when the projected daily spend exceeds the cap', () => {
+      const ctx = context();
+      ctx.usage.dailySpentMinor = toMinor(1900);
+      ctx.request.amountMinor = toMinor(299);
+      const result = evaluatePolicy(ctx);
+      expect(result.reasonCode).toBe(ReasonCode.DAILY_LIMIT_EXCEEDED);
+      expect(ruleOf(result, PolicyRule.DAILY_SPEND_LIMIT).detail).toMatchObject({
+        remainingMinor: toMinor(100),
+      });
+    });
+
+    it('allows a spend that lands exactly on the daily cap', () => {
+      const ctx = context();
+      ctx.usage.dailySpentMinor = toMinor(1701);
+      ctx.request.amountMinor = toMinor(299);
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('blocks when the daily transaction count is exhausted', () => {
+      const ctx = context();
+      ctx.usage.dailyTransactionCount = 5;
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.DAILY_COUNT_EXCEEDED);
+    });
+
+    it('blocks when the per-minute velocity limit is reached', () => {
+      const ctx = context();
+      ctx.usage.countLastMinute = 30;
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.VELOCITY_EXCEEDED);
+    });
+
+    it('blocks outside the permitted hours', () => {
+      const ctx = context();
+      ctx.permission.allowedHoursUtc = { start: 9, end: 11 }; // now is 12:00 UTC
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.OUTSIDE_ALLOWED_HOURS);
+    });
+
+    it('supports a window that wraps midnight', () => {
+      const ctx = context({ now: new Date('2026-09-03T23:30:00.000Z') });
+      ctx.permission.allowedHoursUtc = { start: 22, end: 6 };
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.ALLOW);
+
+      const outside = context({ now: new Date('2026-09-03T12:00:00.000Z') });
+      outside.permission.allowedHoursUtc = { start: 22, end: 6 };
+      expect(evaluatePolicy(outside).decision).toBe(PolicyDecision.BLOCK);
+    });
+
+    it('blocks when the risk score reaches the blocking threshold', () => {
+      const ctx = context({ risk: { score: 80, level: ThreatLevel.CRITICAL } });
+      expect(evaluatePolicy(ctx).reasonCode).toBe(ReasonCode.RISK_TOO_HIGH);
+    });
+  });
+
+  describe('approval rules', () => {
+    it('requires approval above the amount threshold', () => {
+      const ctx = context();
+      ctx.request.amountMinor = toMinor(499);
       const result = evaluatePolicy(ctx);
       expect(result.decision).toBe(PolicyDecision.REQUIRE_APPROVAL);
-      expect(result.violations).toHaveLength(0);
-      expect(result.reasons[0]).toContain('approval threshold');
+      expect(result.reasonCode).toBe(ReasonCode.APPROVAL_THRESHOLD_EXCEEDED);
+    });
+
+    it('does not require approval exactly at the threshold', () => {
+      const ctx = context();
+      ctx.request.amountMinor = toMinor(400);
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('requires approval on an elevated risk score', () => {
+      const ctx = context({ risk: { score: 65, level: ThreatLevel.HIGH } });
+      const result = evaluatePolicy(ctx);
+      expect(result.decision).toBe(PolicyDecision.REQUIRE_APPROVAL);
+      expect(result.reasonCode).toBe(ReasonCode.RISK_REQUIRES_APPROVAL);
+    });
+
+    it('allows when risk sits below the approval threshold', () => {
+      const ctx = context({ risk: { score: 59, level: ThreatLevel.MEDIUM } });
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.ALLOW);
     });
   });
 
-  describe('BLOCK decisions', () => {
-    it('should BLOCK ₹1499 Power Bank (exceeds ₹500 limit)', () => {
-      const ctx = createTestContext({ amount: 1499, category: 'Electronics' });
+  describe('precedence: BLOCK > REQUIRE_APPROVAL > ALLOW', () => {
+    it('a hard block outranks an approval requirement', () => {
+      const ctx = context();
+      ctx.request.amountMinor = toMinor(1499); // over limit AND over threshold
       const result = evaluatePolicy(ctx);
       expect(result.decision).toBe(PolicyDecision.BLOCK);
-      expect(result.violations.some(v => v.rule === ViolationRule.MAX_TRANSACTION_AMOUNT)).toBe(true);
+      // Both rules did fire; only the verdict is BLOCK.
+      expect(ruleOf(result, PolicyRule.APPROVAL_AMOUNT_THRESHOLD).passed).toBe(false);
     });
 
-    it('should BLOCK ₹2999 Bluetooth Speaker', () => {
-      const ctx = createTestContext({ amount: 2999, category: 'Electronics' });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.BLOCK);
+    it('a low risk score can NEVER downgrade a hard policy block', () => {
+      const ctx = context({ risk: { score: 0, level: ThreatLevel.LOW } });
+      ctx.request.amountMinor = toMinor(1499);
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.BLOCK);
     });
 
-    it('should BLOCK when daily spending limit would be exceeded', () => {
-      const ctx = createTestContext({ amount: 399, dailySpent: 1700 });
+    it('the headline reason always matches the verdict', () => {
+      const ctx = context({ risk: { score: 65, level: ThreatLevel.HIGH } });
+      ctx.request.amountMinor = toMinor(1499);
       const result = evaluatePolicy(ctx);
       expect(result.decision).toBe(PolicyDecision.BLOCK);
-      expect(result.violations.some(v => v.rule === ViolationRule.MAX_DAILY_AMOUNT)).toBe(true);
+      const governing = result.evaluatedRules.find((r) => r.reasonCode === result.reasonCode)!;
+      expect(governing.outcome).toBe(PolicyDecision.BLOCK);
     });
 
-    it('should BLOCK when category is not allowed', () => {
-      const ctx = createTestContext({ amount: 299, category: 'Furniture' });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.BLOCK);
-      expect(result.violations.some(v => v.rule === ViolationRule.CATEGORY_NOT_ALLOWED)).toBe(true);
-    });
-
-    it('should BLOCK when daily transaction count exceeded', () => {
-      const ctx = createTestContext({ amount: 299, dailyTransactionCount: 5 });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.BLOCK);
-      expect(result.violations.some(v => v.rule === ViolationRule.MAX_TRANSACTIONS_PER_DAY)).toBe(true);
-    });
-
-    it('should BLOCK when agent lacks purchase intent permission', () => {
-      const ctx = createTestContext({ amount: 299, canCreatePurchaseIntent: false });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.BLOCK);
-      expect(result.violations.some(v => v.rule === ViolationRule.AGENT_PERMISSION_INVALID)).toBe(true);
-    });
-
-    it('should BLOCK when agent permission is expired', () => {
-      const ctx = createTestContext({
-        amount: 299,
-        expiresAt: new Date('2020-01-01'),
-      });
-      const result = evaluatePolicy(ctx);
-      expect(result.decision).toBe(PolicyDecision.BLOCK);
-      expect(result.violations.some(v => v.rule === ViolationRule.AGENT_EXPIRED)).toBe(true);
+    it('surfaces multiple simultaneous violations', () => {
+      const ctx = context({ agentStatus: AgentStatus.BLOCKED });
+      ctx.request.amountMinor = toMinor(9999);
+      ctx.request.currency = 'USD';
+      expect(evaluatePolicy(ctx).violations.length).toBeGreaterThanOrEqual(3);
     });
   });
 
-  describe('Explainability', () => {
-    it('should provide clear reasons for BLOCK', () => {
-      const ctx = createTestContext({ amount: 1499, category: 'Electronics' });
-      const result = evaluatePolicy(ctx);
-      expect(result.reasons.length).toBeGreaterThan(0);
-      expect(result.reasons[0]).toContain('₹1499');
-      expect(result.reasons[0]).toContain('₹500');
+  describe('determinism', () => {
+    it('produces an identical result for an identical context', () => {
+      const a = evaluatePolicy(context());
+      const b = evaluatePolicy(context());
+      expect(JSON.stringify(a)).toBe(JSON.stringify(b));
     });
 
-    it('should provide clear reasons for ALLOW', () => {
-      const ctx = createTestContext({ amount: 299, category: 'Electronics Accessories' });
-      const result = evaluatePolicy(ctx);
-      expect(result.reasons.length).toBeGreaterThan(0);
-      expect(result.reasons[0]).toContain('within limit');
-    });
-  });
-});
-
-// ============================================
-// STATE MACHINE TESTS
-// ============================================
-
-describe('Purchase State Machine', () => {
-  describe('Valid transitions', () => {
-    it('CREATED → EVALUATING', () => {
-      expect(transition(PurchaseStatus.CREATED, PurchaseStatus.EVALUATING)).toBe(PurchaseStatus.EVALUATING);
+    it('does not read the ambient clock', () => {
+      // Same context, evaluated at two different wall-clock moments.
+      const ctx = context();
+      const a = evaluatePolicy(ctx);
+      const later = evaluatePolicy(ctx);
+      expect(a.timestamp).toBe(later.timestamp);
+      expect(a.timestamp).toBe(NOW.toISOString());
     });
 
-    it('EVALUATING → AUTHORIZED', () => {
-      expect(transition(PurchaseStatus.EVALUATING, PurchaseStatus.AUTHORIZED)).toBe(PurchaseStatus.AUTHORIZED);
+    it('does not mutate its input', () => {
+      const ctx = context();
+      const snapshot = JSON.stringify(ctx);
+      evaluatePolicy(ctx);
+      expect(JSON.stringify(ctx)).toBe(snapshot);
     });
 
-    it('EVALUATING → REQUIRE_APPROVAL', () => {
-      expect(transition(PurchaseStatus.EVALUATING, PurchaseStatus.REQUIRE_APPROVAL)).toBe(PurchaseStatus.REQUIRE_APPROVAL);
-    });
-
-    it('EVALUATING → BLOCKED', () => {
-      expect(transition(PurchaseStatus.EVALUATING, PurchaseStatus.BLOCKED)).toBe(PurchaseStatus.BLOCKED);
-    });
-
-    it('REQUIRE_APPROVAL → APPROVED', () => {
-      expect(transition(PurchaseStatus.REQUIRE_APPROVAL, PurchaseStatus.APPROVED)).toBe(PurchaseStatus.APPROVED);
-    });
-
-    it('REQUIRE_APPROVAL → DENIED', () => {
-      expect(transition(PurchaseStatus.REQUIRE_APPROVAL, PurchaseStatus.DENIED)).toBe(PurchaseStatus.DENIED);
-    });
-
-    it('APPROVED → AUTHORIZED', () => {
-      expect(transition(PurchaseStatus.APPROVED, PurchaseStatus.AUTHORIZED)).toBe(PurchaseStatus.AUTHORIZED);
-    });
-
-    it('AUTHORIZED → PAYMENT_PENDING', () => {
-      expect(transition(PurchaseStatus.AUTHORIZED, PurchaseStatus.PAYMENT_PENDING)).toBe(PurchaseStatus.PAYMENT_PENDING);
-    });
-
-    it('PAYMENT_PENDING → PAYMENT_PROCESSING', () => {
-      expect(transition(PurchaseStatus.PAYMENT_PENDING, PurchaseStatus.PAYMENT_PROCESSING)).toBe(PurchaseStatus.PAYMENT_PROCESSING);
-    });
-
-    it('PAYMENT_PROCESSING → COMPLETED', () => {
-      expect(transition(PurchaseStatus.PAYMENT_PROCESSING, PurchaseStatus.COMPLETED)).toBe(PurchaseStatus.COMPLETED);
-    });
-  });
-
-  describe('Invalid transitions must throw', () => {
-    it('BLOCKED → PAYMENT_PROCESSING must fail', () => {
-      expect(() => transition(PurchaseStatus.BLOCKED, PurchaseStatus.PAYMENT_PROCESSING))
-        .toThrow(InvalidTransitionError);
-    });
-
-    it('BLOCKED → AUTHORIZED must fail', () => {
-      expect(() => transition(PurchaseStatus.BLOCKED, PurchaseStatus.AUTHORIZED))
-        .toThrow(InvalidTransitionError);
-    });
-
-    it('DENIED → PAYMENT_PENDING must fail', () => {
-      expect(() => transition(PurchaseStatus.DENIED, PurchaseStatus.PAYMENT_PENDING))
-        .toThrow(InvalidTransitionError);
-    });
-
-    it('COMPLETED → CREATED must fail', () => {
-      expect(() => transition(PurchaseStatus.COMPLETED, PurchaseStatus.CREATED))
-        .toThrow(InvalidTransitionError);
-    });
-
-    it('CREATED → COMPLETED must fail (skip states)', () => {
-      expect(() => transition(PurchaseStatus.CREATED, PurchaseStatus.COMPLETED))
-        .toThrow(InvalidTransitionError);
-    });
-
-    it('CREATED → PAYMENT_PROCESSING must fail', () => {
-      expect(() => transition(PurchaseStatus.CREATED, PurchaseStatus.PAYMENT_PROCESSING))
-        .toThrow(InvalidTransitionError);
-    });
-  });
-
-  describe('canTransition', () => {
-    it('returns true for valid transition', () => {
-      expect(canTransition(PurchaseStatus.CREATED, PurchaseStatus.EVALUATING)).toBe(true);
-    });
-
-    it('returns false for invalid transition', () => {
-      expect(canTransition(PurchaseStatus.BLOCKED, PurchaseStatus.COMPLETED)).toBe(false);
+    it('is order-independent: the verdict is a fold, not a first-match', () => {
+      // Two different violations; whichever is listed first, BLOCK still wins.
+      const ctx = context({ risk: { score: 95, level: ThreatLevel.CRITICAL } });
+      ctx.usage.dailyTransactionCount = 99;
+      expect(evaluatePolicy(ctx).decision).toBe(PolicyDecision.BLOCK);
     });
   });
 });

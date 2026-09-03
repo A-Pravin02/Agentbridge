@@ -28,7 +28,7 @@ export function checkCategorySwitching(ctx: ThreatContext): ThreatFactor | null 
         rule: ThreatRule.SUSPICIOUS_CATEGORY_SWITCHING,
         points: 10,
         message: `Agent is rapidly switching product categories: [${[...distinctCategories].join(', ')}] — current category "${ctx.currentCategory}" was not previously used`,
-        metadata: {
+        detail: {
           distinctCategories: [...distinctCategories],
           currentCategory: ctx.currentCategory,
           previousCategories: recentCategories,

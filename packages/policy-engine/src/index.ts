@@ -1,147 +1,64 @@
 // ============================================
 // AgentBridge - Deterministic Policy Engine
-// The AI suggests. AgentBridge decides.
+// The AI proposes. AgentBridge decides.
 // ============================================
+//
+// THE CENTRAL INVARIANT OF THIS PROJECT:
+// No language model participates in this function. `evaluatePolicy` is a pure,
+// total function of its input. Given the same PolicyContext it always returns
+// the same PolicyResult — no clock reads, no randomness, no I/O, no network.
+//
+// PRECEDENCE: BLOCK > REQUIRE_APPROVAL > ALLOW.
+// A risk signal can escalate an ALLOW to REQUIRE_APPROVAL or BLOCK, but it can
+// NEVER downgrade a hard policy BLOCK. That property falls out of the fold over
+// `mostRestrictive` and is asserted directly by the invariant tests.
 
 import {
   PolicyContext,
   PolicyResult,
   PolicyDecision,
-  PolicyViolation,
-  ViolationRule,
+  ReasonCode,
+  EvaluatedRule,
+  mostRestrictive,
+  DECISION_PRECEDENCE,
 } from '@agentbridge/shared-types';
+import { POLICY_RULES } from './rules.js';
 
-/**
- * Evaluates a purchase request against merchant policy and agent permissions.
- * 
- * Evaluation order:
- * 1. Agent permission validation
- * 2. Transaction amount check
- * 3. Daily spending check
- * 4. Category check
- * 5. Daily transaction count check
- * 6. Approval threshold check
- * 
- * Any hard violation → BLOCK
- * No hard violation but above approval threshold → REQUIRE_APPROVAL
- * Everything passes → ALLOW
- */
 export function evaluatePolicy(context: PolicyContext): PolicyResult {
-  const violations: PolicyViolation[] = [];
-  const reasons: string[] = [];
+  const evaluatedRules: EvaluatedRule[] = POLICY_RULES.map((rule) => rule(context));
+  const violations = evaluatedRules.filter((r) => !r.passed);
 
-  const { request, policy, dailySpent, dailyTransactionCount } = context;
-  const { agentPermission, merchantPolicy } = policy;
-
-  // ---- Step 1: Validate agent permissions ----
-  if (!agentPermission.canCreatePurchaseIntent) {
-    violations.push({
-      rule: ViolationRule.AGENT_PERMISSION_INVALID,
-      message: 'Agent does not have permission to create purchase intents',
-    });
-  }
-
-  if (!agentPermission.canExecutePurchase) {
-    violations.push({
-      rule: ViolationRule.AGENT_PERMISSION_INVALID,
-      message: 'Agent does not have permission to execute purchases',
-    });
-  }
-
-  // Check agent expiry
-  if (agentPermission.expiresAt && new Date(agentPermission.expiresAt) < new Date()) {
-    violations.push({
-      rule: ViolationRule.AGENT_EXPIRED,
-      message: 'Agent permission has expired',
-    });
-  }
-
-  // ---- Step 2: Check transaction amount ----
-  const effectiveMaxTransaction = Math.min(
-    merchantPolicy.maxTransactionAmount,
-    agentPermission.maxTransactionAmount
+  // Fold every rule outcome into a single decision. Order-independent.
+  const decision = evaluatedRules.reduce<PolicyDecision>(
+    (acc, r) => mostRestrictive(acc, r.outcome),
+    PolicyDecision.ALLOW
   );
 
-  if (request.amount > effectiveMaxTransaction) {
-    violations.push({
-      rule: ViolationRule.MAX_TRANSACTION_AMOUNT,
-      message: `Transaction amount ₹${request.amount} exceeds maximum limit ₹${effectiveMaxTransaction}`,
-    });
-  }
+  // Surface the first violation that is as restrictive as the final decision,
+  // so the headline reason always matches the verdict.
+  const governing = violations.find((v) => DECISION_PRECEDENCE[v.outcome] === DECISION_PRECEDENCE[decision]);
 
-  // ---- Step 3: Check daily spending ----
-  const effectiveMaxDaily = Math.min(
-    merchantPolicy.maxDailyAmount,
-    agentPermission.maxDailyAmount
-  );
-
-  if (dailySpent + request.amount > effectiveMaxDaily) {
-    violations.push({
-      rule: ViolationRule.MAX_DAILY_AMOUNT,
-      message: `Daily spending would be ₹${dailySpent + request.amount}, exceeding daily limit ₹${effectiveMaxDaily}`,
-    });
-  }
-
-  // ---- Step 4: Check category ----
-  const merchantAllows = merchantPolicy.allowedCategories.includes(request.productCategory);
-  const agentAllows = agentPermission.allowedCategories.includes(request.productCategory);
-
-  if (!merchantAllows || !agentAllows) {
-    violations.push({
-      rule: ViolationRule.CATEGORY_NOT_ALLOWED,
-      message: `Category "${request.productCategory}" is not allowed`,
-    });
-  }
-
-  // ---- Step 5: Check daily transaction count ----
-  if (dailyTransactionCount + 1 > merchantPolicy.maxTransactionsPerDay) {
-    violations.push({
-      rule: ViolationRule.MAX_TRANSACTIONS_PER_DAY,
-      message: `Daily transaction count would be ${dailyTransactionCount + 1}, exceeding limit of ${merchantPolicy.maxTransactionsPerDay}`,
-    });
-  }
-
-  // ---- Decision Logic ----
-
-  // Any hard violation = BLOCK
-  if (violations.length > 0) {
-    const blockReasons = violations.map((v) => v.message);
-    return {
-      decision: PolicyDecision.BLOCK,
-      reasons: blockReasons,
-      violations,
-    };
-  }
-
-  // ---- Step 6: Check approval threshold ----
-  if (request.amount > merchantPolicy.approvalThreshold) {
-    return {
-      decision: PolicyDecision.REQUIRE_APPROVAL,
-      reasons: [
-        `Transaction amount ₹${request.amount} exceeds approval threshold ₹${merchantPolicy.approvalThreshold}`,
-      ],
-      violations: [],
-    };
-  }
-
-  // Everything passes
-  reasons.push(
-    `Transaction amount ₹${request.amount} is within limit ₹${effectiveMaxTransaction}`,
-    `Daily spending ₹${dailySpent + request.amount} is within daily limit ₹${effectiveMaxDaily}`,
-    `Category "${request.productCategory}" is allowed`,
-  );
+  const humanReadableReason =
+    governing?.message ??
+    (decision === PolicyDecision.ALLOW
+      ? 'All policy checks passed'
+      : 'Transaction did not satisfy merchant policy');
 
   return {
-    decision: PolicyDecision.ALLOW,
-    reasons,
-    violations: [],
+    decisionId: context.decisionId,
+    decision,
+    reasonCode: governing?.reasonCode ?? ReasonCode.OK,
+    humanReadableReason,
+    evaluatedRules,
+    violations,
+    policyVersion: context.merchantPolicy.version,
+    timestamp: context.now.toISOString(),
   };
 }
 
-export { evaluatePolicy as evaluate };
-
-// State machine exports
+export { POLICY_RULES } from './rules.js';
 export {
+  assertTransition,
   canTransition,
   transition,
   getNextStates,

@@ -3,7 +3,15 @@
 // Deterministic, explainable, zero-trust
 // ============================================
 
-import { ThreatContext, ThreatAssessmentResult, ThreatFactor, ThreatLevel, ThreatAction, ThreatRule } from '@agentbridge/shared-types';
+import {
+  ThreatContext,
+  ThreatAssessmentResult,
+  ThreatFactor,
+  ThreatLevel,
+  ThreatAction,
+  ThreatRule,
+  THREAT_BANDS,
+} from '@agentbridge/shared-types';
 import { checkRequestFrequency } from './rules/request-frequency.js';
 import { checkBlockedAttempts } from './rules/blocked-attempts.js';
 import { checkPolicyProbing } from './rules/policy-probing.js';
@@ -50,13 +58,15 @@ export function analyzeThreat(ctx: ThreatContext): ThreatAssessmentResult {
     if (f) factors.push(f);
   }
 
-  // Rule 11: MULTIPLE_SECURITY_WARNINGS — 3+ distinct rules triggered
-  if (factors.length >= 3) {
+  // Rule 11: MULTIPLE_SECURITY_WARNINGS — 3+ distinct rules triggered.
+  // Read the count BEFORE pushing, so this rule never counts itself.
+  const distinctRulesTriggered = factors.length;
+  if (distinctRulesTriggered >= 3) {
     factors.push({
       rule: ThreatRule.MULTIPLE_SECURITY_WARNINGS,
       points: 20,
-      message: `Agent triggered ${factors.length} distinct threat indicators simultaneously`,
-      metadata: { rulesTriggered: factors.map(f => f.rule) },
+      message: `Agent triggered ${distinctRulesTriggered} distinct threat indicators simultaneously`,
+      detail: { rulesTriggered: factors.map((f) => f.rule) },
     });
   }
 
@@ -72,14 +82,15 @@ export function analyzeThreat(ctx: ThreatContext): ThreatAssessmentResult {
     level,
     recommendedAction,
     factors,
-    analyzedAt: new Date(),
+    // Caller-supplied clock keeps the analyzer pure and its output reproducible.
+    analyzedAt: ctx.now ?? new Date(),
   };
 }
 
 function scoreToLevel(score: number): ThreatLevel {
-  if (score >= 80) return ThreatLevel.CRITICAL;
-  if (score >= 60) return ThreatLevel.HIGH;
-  if (score >= 30) return ThreatLevel.MEDIUM;
+  if (score >= THREAT_BANDS.CRITICAL) return ThreatLevel.CRITICAL;
+  if (score >= THREAT_BANDS.HIGH) return ThreatLevel.HIGH;
+  if (score >= THREAT_BANDS.MEDIUM) return ThreatLevel.MEDIUM;
   return ThreatLevel.LOW;
 }
 

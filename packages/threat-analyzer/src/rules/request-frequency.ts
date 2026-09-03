@@ -14,7 +14,7 @@ export function checkRequestFrequency(ctx: ThreatContext): ThreatFactor | null {
       rule: ThreatRule.EXTREME_REQUEST_FREQUENCY,
       points: 50,
       message: `Agent made ${count} purchase attempts within the last 60 seconds (extreme frequency)`,
-      metadata: { count, windowSeconds: 60, threshold: 15 },
+      detail: { count, windowSeconds: 60, threshold: 15 },
     };
   }
 
@@ -23,7 +23,7 @@ export function checkRequestFrequency(ctx: ThreatContext): ThreatFactor | null {
       rule: ThreatRule.HIGH_REQUEST_FREQUENCY,
       points: 20,
       message: `Agent made ${count} purchase attempts within the last 60 seconds`,
-      metadata: { count, windowSeconds: 60, threshold: 5 },
+      detail: { count, windowSeconds: 60, threshold: 5 },
     };
   }
 

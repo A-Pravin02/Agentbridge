@@ -18,14 +18,14 @@ import {
 function createMockContext(overrides: Partial<ThreatContext> = {}): ThreatContext {
   return {
     agentId: 'test-agent-1',
-    currentAmount: 299,
+    currentAmountMinor: 299,
     currentCategory: 'Electronics Accessories',
-    agentMaxTransactionAmount: 1000,
+    agentMaxTransactionMinor: 1000,
     requestCountLast60Sec: 1,
     blockedCountLast10Min: 0,
     blockedCountLast30Min: 0,
     deniedCountLast30Min: 0,
-    recentCompletedAmounts: [299, 350, 280],
+    recentCompletedAmountsMinor: [299, 350, 280],
     recentCategories: ['Electronics Accessories'],
     recentPolicyFailures: [],
     recentPurchaseIntents: [],
@@ -84,8 +84,8 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
     it('returns null for fewer than 3 failures', () => {
       const ctx = createMockContext({
         recentPolicyFailures: [
-          { amount: 500, category: 'Electronics', createdAt: new Date() },
-          { amount: 600, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 500, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 600, category: 'Electronics', createdAt: new Date() },
         ],
       });
       expect(checkPolicyProbing(ctx)).toBeNull();
@@ -94,9 +94,9 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
     it('returns null if failures are identical (single misconfigured request repeated)', () => {
       const ctx = createMockContext({
         recentPolicyFailures: [
-          { amount: 500, category: 'Electronics', createdAt: new Date() },
-          { amount: 500, category: 'Electronics', createdAt: new Date() },
-          { amount: 500, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 500, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 500, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 500, category: 'Electronics', createdAt: new Date() },
         ],
       });
       expect(checkPolicyProbing(ctx)).toBeNull();
@@ -105,9 +105,9 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
     it('triggers REPEATED_POLICY_PROBING (+40) on distinct failure variations', () => {
       const ctx = createMockContext({
         recentPolicyFailures: [
-          { amount: 1500, category: 'Electronics', createdAt: new Date() },
-          { amount: 1200, category: 'Electronics', createdAt: new Date() },
-          { amount: 999, category: 'Phones', createdAt: new Date() },
+          { amountMinor: 1500, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 1200, category: 'Electronics', createdAt: new Date() },
+          { amountMinor: 999, category: 'Phones', createdAt: new Date() },
         ],
       });
       const factor = checkPolicyProbing(ctx);
@@ -120,10 +120,10 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
   describe('Rule 6: Near Limit Attempts', () => {
     it('returns null when attempts are below 90% threshold', () => {
       const ctx = createMockContext({
-        agentMaxTransactionAmount: 1000,
-        currentAmount: 500,
+        agentMaxTransactionMinor: 1000,
+        currentAmountMinor: 500,
         recentPurchaseIntents: [
-          { amount: 400, status: 'COMPLETED', category: 'General', createdAt: new Date() },
+          { amountMinor: 400, status: 'COMPLETED', category: 'General', createdAt: new Date() },
         ],
       });
       expect(checkNearLimit(ctx)).toBeNull();
@@ -131,10 +131,10 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
 
     it('triggers REPEATED_NEAR_LIMIT_ATTEMPTS (+15) for >= 2 attempts >= 90% limit', () => {
       const ctx = createMockContext({
-        agentMaxTransactionAmount: 1000,
-        currentAmount: 950,
+        agentMaxTransactionMinor: 1000,
+        currentAmountMinor: 950,
         recentPurchaseIntents: [
-          { amount: 920, status: 'COMPLETED', category: 'General', createdAt: new Date() },
+          { amountMinor: 920, status: 'COMPLETED', category: 'General', createdAt: new Date() },
         ],
       });
       const factor = checkNearLimit(ctx);
@@ -147,16 +147,16 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
   describe('Rule 7: Unusual Spending Spike', () => {
     it('returns null with insufficient transaction history (<3 samples)', () => {
       const ctx = createMockContext({
-        recentCompletedAmounts: [100, 100],
-        currentAmount: 800,
+        recentCompletedAmountsMinor: [100, 100],
+        currentAmountMinor: 800,
       });
       expect(checkSpendingSpike(ctx)).toBeNull();
     });
 
     it('triggers UNUSUAL_SPENDING_SPIKE (+15) when current is > 1.5x average', () => {
       const ctx = createMockContext({
-        recentCompletedAmounts: [200, 200, 200], // avg = 200, threshold = 300
-        currentAmount: 450,
+        recentCompletedAmountsMinor: [200, 200, 200], // avg = 200, threshold = 300
+        currentAmountMinor: 450,
       });
       const factor = checkSpendingSpike(ctx);
       expect(factor).not.toBeNull();
@@ -169,11 +169,11 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
     it('triggers RAPID_ESCALATION (+15) when strictly increasing >= 1.5x sequence', () => {
       const now = Date.now();
       const ctx = createMockContext({
-        currentAmount: 800,
+        currentAmountMinor: 800,
         recentPurchaseIntents: [
-          { amount: 200, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 300000) },
-          { amount: 400, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 200000) },
-          { amount: 600, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 100000) },
+          { amountMinor: 200, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 300000) },
+          { amountMinor: 400, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 200000) },
+          { amountMinor: 600, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 100000) },
         ],
       });
       const factor = checkRapidEscalation(ctx);
@@ -185,11 +185,11 @@ describe('Behavioral Threat Analyzer (@agentbridge/threat-analyzer)', () => {
     it('returns null for non-increasing sequence', () => {
       const now = Date.now();
       const ctx = createMockContext({
-        currentAmount: 500,
+        currentAmountMinor: 500,
         recentPurchaseIntents: [
-          { amount: 400, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 300000) },
-          { amount: 300, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 200000) },
-          { amount: 500, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 100000) },
+          { amountMinor: 400, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 300000) },
+          { amountMinor: 300, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 200000) },
+          { amountMinor: 500, status: 'COMPLETED', category: 'Tech', createdAt: new Date(now - 100000) },
         ],
       });
       expect(checkRapidEscalation(ctx)).toBeNull();

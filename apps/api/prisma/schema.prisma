@@ -1,4 +1,14 @@
-// This is your Prisma schema file.
+// ============================================
+// AgentBridge Database Schema
+// ============================================
+//
+// CONVENTIONS
+//   *Minor        integer minor currency units (paise). Never Float.
+//                 CHECK constraints in the migration reject negatives.
+//   sequence      monotonic ordering that does not rely on a timestamp.
+//
+// The Postgres variant of this file lives at prisma/schema.postgres.prisma and
+// is byte-identical except for the datasource block. See docs/deployment.md.
 
 generator client {
   provider = "prisma-client-js"
@@ -6,11 +16,11 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  url      = env("DATABASE_URL")
 }
 
 // ============================================
-// AgentBridge Database Schema
+// Tenancy & identity
 // ============================================
 
 model Merchant {
@@ -23,89 +33,181 @@ model Merchant {
   products        Product[]
   agents          Agent[]
   policies        Policy[]
+  users           MerchantUser[]
   purchaseIntents PurchaseIntent[]
 
   @@map("merchants")
 }
 
-model Product {
-  id          String   @id @default(cuid())
-  merchantId  String   @map("merchant_id")
-  name        String
-  description String   @default("")
-  price       Float
-  currency    String   @default("INR")
-  category    String
-  stock       Int      @default(0)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+/// A human who administers a merchant. Approvals are attributed to one of these.
+model MerchantUser {
+  id           String   @id @default(cuid())
+  merchantId   String   @map("merchant_id")
+  email        String   @unique
+  /// scrypt: <salt-hex>:<derived-key-hex>. Never a reversible encoding.
+  passwordHash String   @map("password_hash")
+  /// OWNER | APPROVER | VIEWER
+  role         String   @default("APPROVER")
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now()) @map("created_at")
 
-  merchant        Merchant         @relation(fields: [merchantId], references: [id])
-  purchaseIntents PurchaseIntent[]
+  merchant  Merchant   @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  sessions  Session[]
+  approvals Approval[]
 
-  @@map("products")
+  @@index([merchantId])
+  @@map("merchant_users")
 }
 
+/// Opaque bearer session for the dashboard. Only the SHA-256 of the token is
+/// stored, so a database leak cannot be replayed as a live session.
+model Session {
+  id             String   @id @default(cuid())
+  merchantUserId String   @map("merchant_user_id")
+  tokenHash      String   @unique @map("token_hash")
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  revokedAt      DateTime? @map("revoked_at")
+
+  user MerchantUser @relation(fields: [merchantUserId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// An autonomous agent.
+///
+/// Authentication is Ed25519, NOT a shared secret: the agent holds the private
+/// key and the server stores only `publicKey`. The server therefore holds
+/// nothing capable of impersonating an agent — a database compromise cannot
+/// forge agent requests. This is a deliberate upgrade over HMAC, where the
+/// verifier must hold a secret that can also sign.
 model Agent {
   id         String   @id @default(cuid())
   merchantId String   @map("merchant_id")
   name       String
-  // Single authoritative status: ACTIVE | SUSPENDED | QUARANTINED | BLOCKED
+  /// ACTIVE | SUSPENDED | QUARANTINED | BLOCKED
   status     String   @default("ACTIVE")
+  /// Public key id sent in the X-Agent-Key-Id header.
+  keyId      String   @unique @map("key_id")
+  /// Ed25519 public key, base64 (raw 32 bytes). Public by construction.
+  publicKey  String   @map("public_key")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  // ---- Security Fields ----
   quarantinedAt          DateTime? @map("quarantined_at")
   quarantineReason       String?   @map("quarantine_reason")
   quarantineTriggeredBy  String?   @map("quarantine_triggered_by")
   securityViolationCount Int       @default(0) @map("security_violation_count")
   severeThreatCount      Int       @default(0) @map("severe_threat_count")
   lastSecurityIncidentAt DateTime? @map("last_security_incident_at")
-  // Agent-specific HMAC signing secret (never returned in API responses)
-  signingSecret          String?   @map("signing_secret")
 
-  merchant          Merchant           @relation(fields: [merchantId], references: [id])
-  permissions       AgentPermission[]
+  merchant          Merchant                 @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  permission        AgentPermission?
   purchaseIntents   PurchaseIntent[]
   securityIncidents SecurityIncident[]
   threatAssessments ThreatAssessmentRecord[]
+  dailyLedgers      AgentDailyLedger[]
 
   @@index([merchantId, status])
   @@map("agents")
 }
 
-
+/// The Agent Permission Passport. One per agent.
 model AgentPermission {
   id                      String    @id @default(cuid())
-  agentId                 String    @map("agent_id")
+  agentId                 String    @unique @map("agent_id")
   canSearch               Boolean   @default(true) @map("can_search")
   canCreatePurchaseIntent Boolean   @default(true) @map("can_create_purchase_intent")
   canExecutePurchase      Boolean   @default(true) @map("can_execute_purchase")
+  /// JSON string arrays (SQLite has no native array type).
   allowedCategories       String    @default("[]") @map("allowed_categories")
-  maxTransactionAmount    Float     @map("max_transaction_amount")
-  maxDailyAmount          Float     @map("max_daily_amount")
+  allowedMerchantIds      String    @default("[]") @map("allowed_merchant_ids")
+  allowedCurrencies       String    @default("[\"INR\"]") @map("allowed_currencies")
+  maxTransactionMinor     Int       @map("max_transaction_minor")
+  maxDailyMinor           Int       @map("max_daily_minor")
+  maxTransactionsPerDay   Int       @default(20) @map("max_transactions_per_day")
+  maxPerMinute            Int       @default(10) @map("max_per_minute")
+  /// JSON {"start":9,"end":21} or null.
+  allowedHoursUtc         String?   @map("allowed_hours_utc")
   expiresAt               DateTime? @map("expires_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
 
-  agent Agent @relation(fields: [agentId], references: [id])
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@map("agent_permissions")
 }
 
+// ============================================
+// Policy
+// ============================================
+
 model Policy {
-  id                    String   @id @default(cuid())
-  merchantId            String   @map("merchant_id")
-  maxTransactionAmount  Float    @map("max_transaction_amount")
-  maxDailyAmount        Float    @map("max_daily_amount")
-  maxTransactionsPerDay Int      @map("max_transactions_per_day")
-  allowedCategories     String   @default("[]") @map("allowed_categories")
-  approvalThreshold     Float    @map("approval_threshold")
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @updatedAt @map("updated_at")
+  id                     String    @id @default(cuid())
+  merchantId             String    @map("merchant_id")
+  /// Bumped on every change. Decisions record the version they were made under.
+  version                Int       @default(1)
+  maxTransactionMinor    Int       @map("max_transaction_minor")
+  maxDailyMinor          Int       @map("max_daily_minor")
+  maxTransactionsPerDay  Int       @map("max_transactions_per_day")
+  allowedCategories      String    @default("[]") @map("allowed_categories")
+  allowedCurrencies      String    @default("[\"INR\"]") @map("allowed_currencies")
+  approvalThresholdMinor Int       @map("approval_threshold_minor")
+  riskBlockThreshold     Int       @default(80) @map("risk_block_threshold")
+  riskApprovalThreshold  Int       @default(60) @map("risk_approval_threshold")
+  expiresAt              DateTime? @map("expires_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  merchant Merchant @relation(fields: [merchantId], references: [id])
+  merchant Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  versions PolicyVersion[]
 
+  @@unique([merchantId])
   @@map("policies")
 }
+
+/// Immutable snapshot of a policy at a version, so an old decision can be
+/// re-derived exactly. Never updated after insert.
+model PolicyVersion {
+  id        String   @id @default(cuid())
+  policyId  String   @map("policy_id")
+  version   Int
+  snapshot  String
+  changedBy String   @map("changed_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  policy Policy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  @@unique([policyId, version])
+  @@map("policy_versions")
+}
+
+// ============================================
+// Catalog
+// ============================================
+
+model Product {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  name        String
+  description String   @default("")
+  priceMinor  Int      @map("price_minor")
+  currency    String   @default("INR")
+  category    String
+  stock       Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  merchant        Merchant         @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  purchaseIntents PurchaseIntent[]
+
+  @@index([merchantId, category])
+  @@map("products")
+}
+
+// ============================================
+// Purchase lifecycle
+// ============================================
 
 model PurchaseIntent {
   id          String   @id @default(cuid())
@@ -113,99 +215,204 @@ model PurchaseIntent {
   agentId     String   @map("agent_id")
   productId   String   @map("product_id")
   quantity    Int      @default(1)
-  amount      Float
+  amountMinor Int      @map("amount_minor")
+  currency    String   @default("INR")
   status      String   @default("CREATED")
   agentReason String   @default("") @map("agent_reason")
+  /// True while this intent holds a reservation on the agent's daily budget.
+  budgetHeld  Boolean  @default(false) @map("budget_held")
+  /// Ledger day (UTC, yyyy-mm-dd) the reservation was taken against.
+  ledgerDay   String?  @map("ledger_day")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  merchant          Merchant               @relation(fields: [merchantId], references: [id])
-  agent             Agent                  @relation(fields: [agentId], references: [id])
-  product           Product                @relation(fields: [productId], references: [id])
+  merchant          Merchant                 @relation(fields: [merchantId], references: [id])
+  agent             Agent                    @relation(fields: [agentId], references: [id])
+  product           Product                  @relation(fields: [productId], references: [id])
   authorizations    Authorization[]
   approvals         Approval[]
-  transactions      Transaction[]
+  payments          Payment[]
   threatAssessments ThreatAssessmentRecord[]
 
   @@index([agentId, status, createdAt])
+  @@index([merchantId, createdAt])
   @@map("purchase_intents")
 }
 
+/// The recorded output of one policy evaluation.
 model Authorization {
   id               String   @id @default(cuid())
   purchaseIntentId String   @map("purchase_intent_id")
+  decisionId       String   @unique @map("decision_id")
   decision         String
-  reasons          String   @default("[]")
+  reasonCode       String   @map("reason_code")
+  humanReason      String   @map("human_reason")
+  /// Full evaluatedRules array, for the dashboard timeline and for replay.
+  evaluatedRules   String   @default("[]") @map("evaluated_rules")
   policySnapshot   String   @default("{}") @map("policy_snapshot")
+  policyVersion    Int      @map("policy_version")
+  riskScore        Int?     @map("risk_score")
   expiresAt        DateTime @map("expires_at")
   createdAt        DateTime @default(now()) @map("created_at")
 
-  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id], onDelete: Cascade)
 
+  @@index([purchaseIntentId, createdAt])
   @@map("authorizations")
 }
 
+/// A human-in-the-loop approval request.
+///
+/// Single-use and time-limited by construction:
+///  - `tokenHash` is the SHA-256 of a one-time token shown only to the approver.
+///  - the status transition PENDING -> APPROVED|DENIED is a conditional update,
+///    so a replayed decision affects zero rows.
 model Approval {
   id               String    @id @default(cuid())
   purchaseIntentId String    @map("purchase_intent_id")
   status           String    @default("PENDING")
-  approvedBy       String?   @map("approved_by")
-  approvedAt       DateTime? @map("approved_at")
+  tokenHash        String    @unique @map("token_hash")
+  decidedById      String?   @map("decided_by_id")
+  decidedAt        DateTime? @map("decided_at")
+  expiresAt        DateTime  @map("expires_at")
   createdAt        DateTime  @default(now()) @map("created_at")
 
-  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id], onDelete: Cascade)
+  decidedBy      MerchantUser?  @relation(fields: [decidedById], references: [id])
 
+  @@index([status, expiresAt])
   @@map("approvals")
 }
 
-model Transaction {
+// ============================================
+// Budget ledger — the concurrency control point
+// ============================================
+
+/// One row per (agent, UTC day). This is the ONLY authority on how much an
+/// agent has committed today.
+///
+/// Reservations are taken with a single conditional UPDATE:
+///
+///   UPDATE agent_daily_ledger
+///      SET reserved_minor = reserved_minor + :amount, txn_count = txn_count + 1
+///    WHERE agent_id = :a AND day = :d
+///      AND reserved_minor <= :dailyCap - :amount
+///      AND txn_count < :countCap
+///
+/// The database evaluates the predicate and applies the increment atomically,
+/// so two concurrent requests cannot both observe the same pre-state. A zero
+/// row count means the limit would have been breached and the caller is
+/// refused. This is correct on both SQLite and PostgreSQL and needs no explicit
+/// row locking or non-default isolation level.
+model AgentDailyLedger {
+  id            String   @id @default(cuid())
+  agentId       String   @map("agent_id")
+  /// UTC calendar day, yyyy-mm-dd.
+  day           String
+  reservedMinor Int      @default(0) @map("reserved_minor")
+  txnCount      Int      @default(0) @map("txn_count")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, day])
+  @@map("agent_daily_ledger")
+}
+
+// ============================================
+// Payments
+// ============================================
+
+model Payment {
   id                String   @id @default(cuid())
   purchaseIntentId  String   @map("purchase_intent_id")
-  amount            Float
+  amountMinor       Int      @map("amount_minor")
   currency          String   @default("INR")
-  paymentProvider   String   @default("razorpay") @map("payment_provider")
-  providerOrderId   String?  @map("provider_order_id")
-  providerPaymentId String?  @map("provider_payment_id")
+  provider          String
+  providerOrderId   String   @unique @map("provider_order_id")
+  /// Globally unique: one provider payment can settle at most one transaction.
+  providerPaymentId String?  @unique @map("provider_payment_id")
+  /// PENDING | VERIFIED | FAILED
   status            String   @default("PENDING")
+  verifiedAt        DateTime? @map("verified_at")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id], onDelete: Cascade)
 
-  @@map("transactions")
+  @@index([purchaseIntentId])
+  @@map("payments")
 }
 
+/// Every webhook delivery. `providerEventId` is unique, which makes replay
+/// rejection a database guarantee rather than an application check.
+model WebhookEvent {
+  id              String   @id @default(cuid())
+  provider        String
+  providerEventId String   @map("provider_event_id")
+  eventType       String   @map("event_type")
+  signatureValid  Boolean  @map("signature_valid")
+  processed       Boolean  @default(false)
+  payloadDigest   String   @map("payload_digest")
+  receivedAt      DateTime @default(now()) @map("received_at")
+
+  @@unique([provider, providerEventId])
+  @@index([receivedAt])
+  @@map("webhook_events")
+}
+
+// ============================================
+// Audit
+// ============================================
+
+/// Append-only, hash-chained. See packages/audit for the digest definition.
 model AuditEvent {
   id           String   @id @default(cuid())
+  /// Gapless and monotonic. A gap proves deletion.
+  sequence     Int      @unique
   action       String
   actorType    String   @map("actor_type")
   actorId      String   @map("actor_id")
   entityId     String   @map("entity_id")
+  /// Application-authoritative ISO-8601 timestamp. This exact string is hashed.
+  timestamp    String
   metadata     String   @default("{}")
-  previousHash String   @default("") @map("previous_hash")
-  hash         String   @default("")
+  previousHash String   @map("previous_hash")
+  hash         String   @unique
   createdAt    DateTime @default(now()) @map("created_at")
 
-  @@index([entityId, createdAt])
+  @@index([entityId, sequence])
+  @@index([action, sequence])
   @@map("audit_events")
 }
 
+/// Single-row pointer to the chain tip. Advanced by an optimistic
+/// compare-and-swap so concurrent appends serialize instead of forking.
+model AuditChainHead {
+  id           String   @id @default("singleton")
+  sequence     Int      @default(-1)
+  hash         String   @default("GENESIS")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("audit_chain_head")
+}
+
 // ============================================
-// Security Defense Models
+// Security
 // ============================================
 
 model SecurityIncident {
   id          String    @id @default(cuid())
   agentId     String    @map("agent_id")
-  type        String    // SecurityViolation or ThreatRule value
-  severity    String    @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
+  type        String
+  severity    String    @default("MEDIUM")
   description String
   metadata    String    @default("{}")
   detectedAt  DateTime  @default(now()) @map("detected_at")
   resolvedAt  DateTime? @map("resolved_at")
   resolution  String?
 
-  agent Agent @relation(fields: [agentId], references: [id])
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, detectedAt])
   @@index([severity, detectedAt])
@@ -217,41 +424,47 @@ model ThreatAssessmentRecord {
   purchaseIntentId  String   @map("purchase_intent_id")
   agentId           String   @map("agent_id")
   score             Int
-  level             String   // ThreatLevel enum value
-  recommendedAction String   @map("recommended_action") // ThreatAction enum value
+  level             String
+  recommendedAction String   @map("recommended_action")
   factors           String   @default("[]")
   createdAt         DateTime @default(now()) @map("created_at")
 
-  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id])
-  agent          Agent          @relation(fields: [agentId], references: [id])
+  purchaseIntent PurchaseIntent @relation(fields: [purchaseIntentId], references: [id], onDelete: Cascade)
+  agent          Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, createdAt])
+  @@index([purchaseIntentId, createdAt])
   @@map("threat_assessments")
 }
 
+/// Idempotency: same key + same body returns the stored result; same key +
+/// different body is a conflict and a security incident.
 model IdempotencyRecord {
   id             String   @id @default(cuid())
-  idempotencyKey String   @unique @map("idempotency_key")
+  idempotencyKey String   @map("idempotency_key")
+  agentId        String   @map("agent_id")
   requestHash    String   @map("request_hash")
   endpoint       String
   resultData     String   @default("{}") @map("result_data")
-  status         String   @default("PROCESSING")
+  statusCode     Int      @default(200) @map("status_code")
   createdAt      DateTime @default(now()) @map("created_at")
   expiresAt      DateTime @map("expires_at")
 
-  @@index([idempotencyKey])
+  /// Scoped per agent so one tenant cannot squat another's key space.
+  @@unique([agentId, idempotencyKey])
+  @@index([expiresAt])
   @@map("idempotency_records")
 }
 
+/// Replay protection: a signed request nonce may be presented exactly once.
 model ConsumedRequest {
-  id          String   @id @default(cuid())
-  agentId     String   @map("agent_id")
-  requestId   String   @map("request_id")
-  requestHash String   @map("request_hash")
-  consumedAt  DateTime @default(now()) @map("consumed_at")
-  expiresAt   DateTime @map("expires_at")
+  id         String   @id @default(cuid())
+  agentId    String   @map("agent_id")
+  requestId  String   @map("request_id")
+  consumedAt DateTime @default(now()) @map("consumed_at")
+  expiresAt  DateTime @map("expires_at")
 
   @@unique([agentId, requestId])
-  @@index([agentId, consumedAt])
+  @@index([expiresAt])
   @@map("consumed_requests")
 }

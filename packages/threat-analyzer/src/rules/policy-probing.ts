@@ -15,7 +15,7 @@ export function checkPolicyProbing(ctx: ThreatContext): ThreatFactor | null {
   if (failures.length < 3) return null;
 
   // Check for variation: distinct amounts or distinct categories
-  const distinctAmounts = new Set(failures.map(f => Math.round(f.amount))).size;
+  const distinctAmounts = new Set(failures.map(f => Math.round(f.amountMinor))).size;
   const distinctCategories = new Set(failures.map(f => f.category)).size;
 
   if (distinctAmounts >= 2 || distinctCategories >= 2) {
@@ -23,7 +23,7 @@ export function checkPolicyProbing(ctx: ThreatContext): ThreatFactor | null {
       rule: ThreatRule.REPEATED_POLICY_PROBING,
       points: 40,
       message: `Agent appears to be probing authorization boundaries: ${failures.length} policy failures with ${distinctAmounts} distinct amounts and ${distinctCategories} distinct categories in 10 minutes`,
-      metadata: {
+      detail: {
         failureCount: failures.length,
         distinctAmounts,
         distinctCategories,
