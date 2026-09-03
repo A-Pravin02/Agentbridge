@@ -68,7 +68,7 @@ Three examples of that rule in action:
 |---|---|---|
 | Daily spending limit | `SELECT` spend, compare, `INSERT` | One conditional `UPDATE` whose predicate *is* the limit, so the check and the increment are one atomic operation |
 | Payment settlement | Trust a `status: success` field | HMAC-SHA256 over `orderId\|paymentId`, with the order id read from our own database |
-| Audit integrity | Append rows and hope | SHA-256 chain over a gapless sequence, verified on demand and in CI |
+| Audit integrity | Append rows and hope | SHA-256 chain over a gapless sequence, verified on demand by `POST /api/audit/verify` |
 
 ---
 
@@ -137,6 +137,9 @@ Run the whole verification suite:
 ```bash
 npm run verify
 ```
+
+CI runs the same command on every push (`.github/workflows/verify.yml`), so a
+regression in any security invariant fails the build.
 
 ### See it defend itself
 
@@ -295,6 +298,9 @@ system claims, and it drives the real server:
 | [docs/demo-script.md](docs/demo-script.md) | A timed walkthrough |
 | [docs/deployment.md](docs/deployment.md) | PostgreSQL, real Razorpay keys, production checklist |
 | [docs/PITCH.md](docs/PITCH.md) | The argument, condensed |
+| [docs/COMPETITIVE_ANALYSIS.md](docs/COMPETITIVE_ANALYSIS.md) | What exists already, and where the gap actually is |
+| [docs/BUSINESS_MODEL.md](docs/BUSINESS_MODEL.md) | AgentBridge evaluated as infrastructure |
+| [docs/FINAL_REVIEW.md](docs/FINAL_REVIEW.md) | Self-assessment, scored, with the criticisms I expect |
 
 ---
 

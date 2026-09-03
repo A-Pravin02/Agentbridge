@@ -1,0 +1,65 @@
+name: verify
+
+# The security invariants are the project's central claim. This workflow makes
+# them a gate rather than an assertion: if any invariant regresses, the build
+# goes red and the claim is falsified automatically.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        working-directory: apps/api
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+        working-directory: apps/api
+        env:
+          DATABASE_URL: file:./ci.db
+
+      - name: Typecheck (api, mcp, web)
+        run: npm run typecheck
+
+      # The suite provisions its own database and generates its own agent keys,
+      # so no secrets are needed. Config validation supplies ephemeral values in
+      # non-production, which is exactly the behaviour being relied on here.
+      - name: Security invariants and adversarial suite
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      # Advisories in the Prisma CLI (a dev dependency, not in the runtime path)
+      # are documented in SECURITY_AUDIT.md as accepted risk A-5. Fail only on
+      # runtime dependencies.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
