@@ -41,7 +41,35 @@ export interface AuditedEvent {
   timestamp: string;
 }
 
-const MAX_APPEND_ATTEMPTS = 8;
+const MAX_APPEND_ATTEMPTS = 12;
+
+/**
+ * Serializes audit appends within this process.
+ *
+ * The chain head is a single row advanced by compare-and-swap, so concurrent
+ * appends contend by construction. On SQLite a round trip is microseconds and
+ * the retry loop absorbed that easily. Against a networked PostgreSQL each
+ * attempt costs a round trip, so ten concurrent writers exhausted the retry
+ * budget and the conflict escaped as a 500 — a failure mode invisible until the
+ * suite was pointed at a real Postgres.
+ *
+ * Queuing appends in-process removes contention between requests handled by the
+ * SAME instance, which is where essentially all of it comes from. The CAS is
+ * retained and still does the real work: it is what keeps the chain correct
+ * across MULTIPLE instances, where no in-process lock can help.
+ *
+ * The queue is a promise chain rather than a lock, so it adds no polling and
+ * preserves arrival order.
+ */
+let appendQueue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(work: () => Promise<T>): Promise<T> {
+  // Attach to the tail regardless of how the previous append settled, so one
+  // failure cannot wedge the queue for every subsequent caller.
+  const result = appendQueue.then(work, work);
+  appendQueue = result.catch(() => undefined);
+  return result;
+}
 
 /**
  * Appends one event to the chain.
@@ -54,23 +82,29 @@ export async function recordAuditEvent(
   input: AuditInput,
   tx?: Db
 ): Promise<AuditedEvent> {
+  // Inside a caller's transaction there is nothing to retry: a CAS conflict has
+  // already poisoned that transaction, so it must abort and the CALLER retries.
   if (tx) return appendOnce(tx, input);
 
-  // Standalone: retry the CAS if a concurrent writer moves the tip first.
-  let lastError: unknown;
-  for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt++) {
-    try {
-      return await prisma.$transaction((t) => appendOnce(t, input));
-    } catch (error) {
-      if (!isRetryable(error)) throw error;
-      lastError = error;
-      // Small jittered backoff so contending writers do not lock-step.
-      await new Promise((r) => setTimeout(r, 2 + Math.floor(Math.random() * 8)));
+  return enqueue(async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt++) {
+      try {
+        return await prisma.$transaction((t) => appendOnce(t, input));
+      } catch (error) {
+        if (!isRetryable(error)) throw error;
+        lastError = error;
+        // Exponential backoff with jitter. The flat 2-10ms delay assumed a
+        // local database; against a networked one it retried far faster than
+        // the contention could clear.
+        const base = Math.min(20 * 2 ** attempt, 500);
+        await new Promise((r) => setTimeout(r, base + Math.floor(Math.random() * base)));
+      }
     }
-  }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error('Audit append failed after repeated contention');
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Audit append failed after repeated contention');
+  });
 }
 
 function isRetryable(error: unknown): boolean {

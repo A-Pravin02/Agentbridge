@@ -45,3 +45,7 @@ coverage/
 # Generated working copy — the real migrations live in
 # prisma/migrations-sqlite and prisma/migrations-postgres.
 apps/api/prisma/migrations/
+.neon
+
+# Local scratch: Neon test-branch connection string
+.pg-test-url

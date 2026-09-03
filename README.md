@@ -227,7 +227,7 @@ Read [docs/architecture.md](docs/architecture.md) for the full picture, and
 |---|---|---|
 | Backend | Node 18+, TypeScript (strict), Fastify | |
 | ORM | Prisma | |
-| Database | **SQLite** by default; PostgreSQL supported | see below |
+| Database | **SQLite** by default; PostgreSQL verified | see below |
 | Payments | Razorpay test mode, or a local sandbox | verification is identical in both |
 | Agent identity | Ed25519 (`node:crypto`) | server holds only public keys |
 | AI integration | MCP (`@modelcontextprotocol/sdk`) | |
@@ -240,7 +240,9 @@ ledger uses an atomic conditional `UPDATE` rather than `SELECT … FOR UPDATE`, 
 correct on both engines and needs no special isolation level.
 
 PostgreSQL is a first-class target: `npm run db:use:postgres` swaps the schema and
-migrations, and the Postgres migration carries the same 18 `CHECK` constraints. See
+migrations, and the Postgres migration carries the same 18 `CHECK` constraints. **The
+full suite — all 184 tests, every concurrency invariant included — passes against a
+real Neon PostgreSQL instance as well as SQLite.** See
 [docs/deployment.md](docs/deployment.md).
 
 ## Deploying

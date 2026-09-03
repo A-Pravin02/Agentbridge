@@ -77,9 +77,14 @@ The concurrency invariants are the ones that matter. They should pass unchanged 
 budget ledger uses an atomic conditional `UPDATE` rather than `SELECT ... FOR UPDATE`
 specifically so that it is correct on both engines with no isolation-level tuning.
 
-> **Not yet done in this repository.** Docker would not start in the environment where
-> this was built, so the Postgres path is configured and its DDL is generated, but the
-> suite has only been run against SQLite. Run the command above before relying on it.
+> **Verified.** The full suite — all 184 tests, including every concurrency invariant —
+> passes against a real Neon PostgreSQL instance as well as SQLite.
+>
+> It was worth doing: the Postgres run exposed a bug SQLite could not. The audit
+> chain's compare-and-swap retry loop used a flat 2–10 ms backoff, which is ample when
+> a round trip is microseconds and hopeless when it is ~100 ms. Under ten-way
+> concurrency the retries exhausted and the conflict escaped as a 500, orphaning a
+> budget reservation. Both are fixed; see SECURITY_AUDIT.md finding N-5.
 
 ---
 

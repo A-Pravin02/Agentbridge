@@ -356,22 +356,40 @@ export async function evaluatePurchaseIntent(
       return { authorizationId: authorization.id, approvalToken: token, approvalExpiresAt: expiresAt };
     });
 
+  /**
+   * Releases a reservation that no longer backs a live purchase.
+   *
+   * Conditional on `budgetHeld`, so it is safe to call more than once and
+   * cannot double-release. This is the compensating action for every failure
+   * path after the reservation — not just a failed persist, which is all the
+   * first version covered. A throw in the closing audit append left the
+   * reservation orphaned, and the ledger stopped reconciling against the
+   * intents actually holding budget.
+   */
+  const compensate = async () => {
+    if (!reservedDay) return;
+    const cleared = await prisma.purchaseIntent
+      .updateMany({ where: { id: intentId, budgetHeld: true }, data: { budgetHeld: false } })
+      .catch(() => ({ count: 0 }));
+    // If the intent never recorded the hold, the reservation is still ours to
+    // return; if it did, clearing the flag is what authorises the release.
+    await releaseBudget({ agentId, day: reservedDay, amountMinor: intent.amountMinor }).catch(
+      () => undefined
+    );
+    void cleared;
+  };
+
   let persisted: Awaited<ReturnType<typeof persist>>;
   try {
     persisted = await persist();
   } catch (error) {
-    if (reservedDay) {
-      await releaseBudget({
-        agentId,
-        day: reservedDay,
-        amountMinor: intent.amountMinor,
-      }).catch(() => undefined);
-    }
+    await compensate();
     throw error;
   }
   const { authorizationId, approvalToken, approvalExpiresAt } = persisted;
 
-  await recordAuditEvent({
+  try {
+    await recordAuditEvent({
     action:
       decision === PolicyDecision.ALLOW
         ? AuditAction.PURCHASE_ALLOWED
@@ -390,7 +408,14 @@ export async function evaluatePurchaseIntent(
       quarantined,
       reason: humanReason,
     },
-  });
+    });
+  } catch (error) {
+    // The decision is committed but its audit record is not. Rather than serve
+    // a state change with no audit trail, roll the reservation back and fail —
+    // an unaudited authorization is exactly what this system exists to prevent.
+    await compensate();
+    throw error;
+  }
 
   const updated = await prisma.purchaseIntent.findUniqueOrThrow({
     where: { id: intentId },

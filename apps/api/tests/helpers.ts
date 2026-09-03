@@ -60,6 +60,36 @@ export interface TestWorld {
   ownerId: string;
 }
 
+/**
+ * Empties every table in the public schema, in one statement.
+ *
+ * CASCADE handles the foreign-key graph so the order does not matter, and
+ * RESTART IDENTITY resets sequences so ids do not drift between runs. Tables
+ * are discovered from the catalogue rather than hard-coded, so a new model
+ * cannot silently start leaking state across test files.
+ */
+function truncatePostgres(): void {
+  const script = `
+    const { PrismaClient } = require('@prisma/client');
+    (async () => {
+      const prisma = new PrismaClient();
+      const rows = await prisma.$queryRawUnsafe(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'"
+      );
+      if (rows.length) {
+        const list = rows.map((r) => '"' + r.tablename + '"').join(', ');
+        await prisma.$executeRawUnsafe('TRUNCATE TABLE ' + list + ' RESTART IDENTITY CASCADE');
+      }
+      await prisma.$disconnect();
+    })().catch((e) => { console.error(e); process.exit(1); });
+  `;
+  execFileSync('node', ['-e', script], {
+    cwd: API_ROOT,
+    env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL },
+    stdio: 'pipe',
+  });
+}
+
 /** Creates a fresh database from the migrations, on whichever engine is in use. */
 export function resetDatabase(): void {
   // The Prisma CLI reads apps/api/.env, which pins the local SQLite URL. Passing
@@ -76,10 +106,16 @@ export function resetDatabase(): void {
     });
 
   if (IS_POSTGRES) {
-    // No file to delete — drop and re-apply the schema instead. `migrate reset`
-    // is destructive by design and is why the suite must never be pointed at a
-    // database that holds anything worth keeping.
-    run(['migrate', 'reset', '--force', '--skip-seed', '--skip-generate']);
+    // Deliberately NOT `migrate reset`. That drops the schema, and a test
+    // harness should never hold a loaded gun pointed at whatever database its
+    // connection string happens to name.
+    //
+    // `migrate deploy` is idempotent and non-destructive: it applies any
+    // missing migrations and does nothing on an up-to-date schema. Between runs
+    // the tables are then emptied — which clears test data without touching the
+    // schema, and is scoped to tables this schema owns.
+    run(['migrate', 'deploy']);
+    truncatePostgres();
     return;
   }
 

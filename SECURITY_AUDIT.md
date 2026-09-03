@@ -16,15 +16,15 @@ covered the previous build; this one covers what replaced it.
 | Severity | Found | Fixed | Open |
 |---|---:|---:|---:|
 | Critical | 0 | 0 | 0 |
-| High | 2 | 2 | 0 |
+| High | 3 | 3 | 0 |
 | Medium | 2 | 2 | 0 |
 | Low / accepted | 5 | 0 | 5 (documented) |
 
 All ten Phase 0 security invariants now hold and are enforced by tests. Four new
 defects were introduced by the rebuild itself; all four are fixed.
 
-**Test posture:** 184 tests, all passing. 29 invariant tests and 55 adversarial tests
-drive the real server over HTTP.
+**Test posture:** 184 tests, all passing **on both SQLite and a real Neon PostgreSQL
+instance**. 29 invariant tests and 55 adversarial tests drive the real server over HTTP.
 
 ---
 
@@ -109,6 +109,77 @@ matters, since over-filtering would be a silent regression too.
 audit events for much older intents may not appear in the global listing. The
 per-transaction timeline is unaffected and always complete. A `merchantId` column on
 `audit_events`, included in the digest, would remove the bound; noted for the roadmap.
+
+---
+
+### N-5 — HIGH — Audit-chain contention failed requests and orphaned budget on PostgreSQL
+
+**Component:** `apps/api/src/services/audit-service.ts`, `purchase-service.ts`
+
+**Found by:** running the suite against a real PostgreSQL instance for the first time.
+SQLite could not have exposed it.
+
+**Exploit / failure.** The audit chain head is a single row advanced by
+compare-and-swap, so concurrent appends contend by design and losers retry. The retry
+loop used a flat 2–10 ms backoff and 8 attempts — ample when a database round trip is
+microseconds, hopeless when it is ~100 ms across a network.
+
+Under ten concurrent purchase evaluations against Neon:
+
+```
+[0] Error: CAS_CONFLICT: audit chain head advanced concurrently
+[2] Error: CAS_CONFLICT: audit chain head advanced concurrently
+[6] Error: CAS_CONFLICT: audit chain head advanced concurrently
+[7] Error: CAS_CONFLICT: audit chain head advanced concurrently
+fulfilled: 6 / 10
+ledger.reservedMinor: 179400   sum(budgetHeld): 149500
+RECONCILES: NO -- LEAK
+```
+
+Two distinct defects:
+
+1. **Availability.** Four of ten requests returned HTTP 500 and their purchase intents
+   were stranded in `EVALUATING`.
+2. **Budget leak.** The reservation compensator covered a failed `persist()` only. A
+   throw in the *closing audit append* — after persist had committed — left the
+   reservation orphaned, so the ledger no longer reconciled against the intents
+   actually holding budget. Not a limit breach (the ledger over-counted, which is the
+   safe direction) but it silently shrinks an agent's headroom, and a ledger drifting
+   out of step with decisions is how genuine over-spend begins.
+
+**Root cause.** Both are the same mistake in different clothes: tuning and error
+handling written against a local, effectively-zero-latency database, then assumed to
+hold on a networked one.
+
+**Fix.**
+- Audit appends are now serialized **within the process** by a promise-chain queue.
+  Essentially all contention comes from concurrent requests on the same instance, and
+  a queue removes it entirely. The CAS is retained and still does the real work —
+  keeping the chain correct **across instances**, where no in-process lock can help.
+- Backoff is exponential with jitter (20 ms doubling to 500 ms), and the attempt budget
+  is 12.
+- `recordAuditEvent(input, tx)` documents that it deliberately does not retry: inside a
+  caller's transaction a conflict has already poisoned it, so the caller must retry.
+- Reservation compensation now covers **every** post-reservation failure path, not just
+  a failed persist, and is conditional on `budgetHeld` so it cannot double-release.
+- A failure to record the audit event now **rolls the reservation back and fails the
+  request**. An authorization with no audit trail is precisely what this system exists
+  to prevent, so serving one would be worse than refusing.
+
+**Verified after the fix:**
+
+```
+fulfilled: 10 / 10
+statuses: {"AUTHORIZED":6,"BLOCKED":4}      <- 6 = floor(Rs.2000 / Rs.299), the exact maximum
+ledger.reservedMinor: 179400  sum(budgetHeld): 179400
+RECONCILES: YES
+```
+
+**Regression test:** INVARIANT 2 — `HOLDS UNDER CONCURRENCY`, which now asserts ledger
+reconciliation (`reservedMinor === allowed × price`) rather than an exact grant count.
+Exact-count was the wrong assertion: refusing a purchase the budget could have covered
+is a liveness cost, while granting one it could not is a security failure. Only the
+latter is an invariant.
 
 ---
 
@@ -272,9 +343,14 @@ including the legitimate case, and the test would prove nothing.
 
 ## Verdict
 
-The current build has no known critical or high-severity vulnerabilities. The four
-defects the rebuild introduced were found by adversarial review of my own code, were
-reproduced before being fixed, and each carries a regression test.
+The current build has no known critical or high-severity vulnerabilities. The five
+defects the rebuild introduced were found by adversarial review of my own code and by
+running the suite on a second database engine. Each was reproduced before being fixed,
+and each carries a regression test.
+
+N-5 is worth singling out. It was invisible on SQLite and appeared immediately on
+PostgreSQL, which is the argument for testing against the engine you actually deploy
+rather than the one that is convenient.
 
 The property I would put weight on is not the absence of findings — it is that the
 system's security claims are executable. Ten invariants, written as tests against the

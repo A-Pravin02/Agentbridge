@@ -26,11 +26,11 @@ survive a serious production review in that dimension.
 | **Demo** | 9 | Fourteen real scenarios through the real stack with declared expectations. Reruns cleanly, isolates state, and turns red on regression. The strongest demo asset is that it can fail. |
 | **Testing** | 9 | 184 tests where the security-critical paths are the *most* covered, not the least. Invariants map one-to-one onto claims. CI now gates them. Missing: property-based testing, and the workflow has not yet run on a real runner. |
 | **Documentation** | 9 | Twelve documents including two adversarial audits with reproduction commands. Limitations sections are real. Slightly over-long in places. |
-| **Scalability** | 5 | Honest weak spot. SQLite default, in-process rate limiting, audit appends serialize on one chain head, no queue. The design is sound and portable, but this build does not scale as-is. |
+| **Scalability** | 6 | Still the weak spot: in-process rate limiting, audit appends serialize on one chain head, no queue. Up one point because the concurrency invariants are now *verified* on PostgreSQL rather than assumed, and the append path was hardened for network latency in the process. |
 | **Business potential** | 6 | Plausible infrastructure thesis with a clear wedge — and a genuinely threatening counter-case (payment providers absorbing it) that I have not resolved. |
 | **Production readiness** | 6 | Up from 2 at audit time. Real auth, real constraints, real verification, health/readiness endpoints. Not higher: SQLite, no key rotation, no shared rate-limit store, unexercised live payments, no deployed instance. |
 
-**Mean: 7.7** · **Security-weighted mean: 8.4**
+**Mean: 7.8** · **Security-weighted mean: 8.4**
 
 ---
 
@@ -96,12 +96,12 @@ survive a serious production review in that dimension.
 
 ## 5. The single biggest weakness
 
-**Scalability, and specifically SQLite as the default.**
+**Operational maturity under load.**
 
-Not because the design is wrong — the concurrency controls are engine-agnostic on
-purpose, and the invariants prove they hold — but because it is the gap between "this
-is correct" and "this is deployable," and it is the first thing a serious reviewer will
-push on.
+The concurrency controls are now verified on PostgreSQL, which removes the sharpest
+form of this criticism. What remains is real: rate limiting does not survive
+horizontal scaling, and audit appends serialize on a single chain head — a deliberate
+trade for a globally ordered verifiable log, but a hard throughput ceiling.
 
 The runner-up is the sandboxed payment counterparty, which is the more *likely* thing
 to be challenged even though it is the less serious problem.
@@ -138,7 +138,9 @@ In priority order, with realistic effort:
 
 1. ~~Add CI~~ — **done.** `.github/workflows/verify.yml` gates typecheck, tests and
    build on every push. Still needs one real run on a runner to confirm it is green.
-2. **Run the suite against PostgreSQL once** (~2h) and put the result in the README.
+2. ~~Run the suite against PostgreSQL once~~ — **done.** 184/184 against Neon. It
+   found a real bug SQLite could not (see N-5 in SECURITY_AUDIT.md).
+3. **Formerly item 2:** (~2h) and put the result in the README.
    Converts "the design is engine-agnostic" from an assertion into evidence, and
    directly answers the biggest criticism.
 3. **Sanitise catalogue text** before it reaches the model (~2h). Closes T47, the
