@@ -10,6 +10,8 @@ import {
   formatMinor,
   getToken,
   setToken,
+  onWaking,
+  warmUp,
   ApiError,
   type AgentRow,
   type AuditRow,
@@ -40,7 +42,15 @@ export default function Dashboard() {
   const [checking, setChecking] = useState(true);
   const [tab, setTab] = useState<Tab>('overview');
 
+  const [waking, setWaking] = useState(false);
+
+  useEffect(() => onWaking(setWaking), []);
+
   useEffect(() => {
+    // Begin waking the API immediately, so it is booting while the visitor is
+    // still reading the sign-in screen rather than after they click.
+    warmUp();
+
     if (!getToken()) {
       setChecking(false);
       return;
@@ -56,7 +66,7 @@ export default function Dashboard() {
     return <Shell><Empty>Checking session…</Empty></Shell>;
   }
   if (!user) {
-    return <Login onSignedIn={setUser} />;
+    return <Login onSignedIn={setUser} waking={waking} />;
   }
 
   return (
@@ -130,7 +140,13 @@ function Shell({
   );
 }
 
-function Login({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
+function Login({
+  onSignedIn,
+  waking,
+}: {
+  onSignedIn: (u: SessionUser) => void;
+  waking: boolean;
+}) {
   const [email, setEmail] = useState('owner@techkart.demo');
   const [password, setPassword] = useState('techkart-demo-2026');
   const [error, setError] = useState<string | null>(null);
@@ -176,9 +192,15 @@ function Login({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
                 required
               />
             </label>
-            {error && <ErrorBanner message={error} />}
+            {waking && (
+              <div className="rounded-lg border border-amber-800/60 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
+                Waking the API — it sleeps when idle on the free tier, so the first
+                request can take up to 30 seconds. This retries automatically.
+              </div>
+            )}
+            {error && !waking && <ErrorBanner message={error} />}
             <Button type="submit" variant="primary" disabled={busy} className="w-full">
-              {busy ? 'Signing in…' : 'Sign in'}
+              {busy ? (waking ? 'Waking the server…' : 'Signing in…') : 'Sign in'}
             </Button>
           </form>
         </Card>

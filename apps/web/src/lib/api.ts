@@ -41,22 +41,89 @@ export function setToken(token: string | null): void {
   }
 }
 
+// ---- Cold start handling ----
+//
+// The API is hosted on a free tier that sleeps after a period of inactivity, so
+// the FIRST request after an idle spell can take ~30s while the container wakes.
+// Without this, a visitor's first click just shows an error — the worst possible
+// first impression for something whose whole point is reliability.
+//
+// So a request that fails in a way consistent with a sleeping server is retried
+// with backoff, and the UI is told to explain what is happening rather than
+// leaving a spinner to look like a hang.
+
+type WakeListener = (waking: boolean) => void;
+const wakeListeners = new Set<WakeListener>();
+let isWaking = false;
+
+/** Subscribe to cold-start state. Returns an unsubscribe function. */
+export function onWaking(listener: WakeListener): () => void {
+  wakeListeners.add(listener);
+  listener(isWaking);
+  return () => wakeListeners.delete(listener);
+}
+
+function setWaking(value: boolean) {
+  if (isWaking === value) return;
+  isWaking = value;
+  wakeListeners.forEach((l) => l(value));
+}
+
+/** Statuses a sleeping or still-booting container produces. */
+const COLD_START_STATUSES = new Set([502, 503, 504]);
+const MAX_WAIT_MS = 90_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init.headers,
-    },
-  });
+  const started = Date.now();
+  let attempt = 0;
 
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new ApiError(res.status, body.error ?? `Request failed (${res.status})`, body.code);
+  for (;;) {
+    let res: Response;
+    try {
+      res = await fetch(`${API_URL}${path}`, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...init.headers,
+        },
+      });
+    } catch (networkError) {
+      // Fetch itself failed — unreachable host, which is what a sleeping
+      // service looks like from the browser.
+      if (Date.now() - started < MAX_WAIT_MS) {
+        setWaking(true);
+        await sleep(Math.min(1000 * 2 ** attempt++, 5000));
+        continue;
+      }
+      setWaking(false);
+      throw new ApiError(0, 'Could not reach the API. It may still be starting up.');
+    }
+
+    if (COLD_START_STATUSES.has(res.status) && Date.now() - started < MAX_WAIT_MS) {
+      setWaking(true);
+      await sleep(Math.min(1000 * 2 ** attempt++, 5000));
+      continue;
+    }
+
+    setWaking(false);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new ApiError(res.status, body.error ?? `Request failed (${res.status})`, body.code);
+    }
+    return body.data as T;
   }
-  return body.data as T;
+}
+
+/**
+ * Fire-and-forget wake-up, called as soon as the page loads so the container
+ * starts booting while the visitor is still reading the sign-in screen.
+ */
+export function warmUp(): void {
+  fetch(`${API_URL}/api/health`).catch(() => undefined);
 }
 
 // ---- Types mirroring the API responses ----
